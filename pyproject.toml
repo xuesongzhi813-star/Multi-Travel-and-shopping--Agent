@@ -37,6 +37,14 @@ psycopg = {version = "3.3.9", extras = ["binary"]}
 pymysql = {version = "1.2.4", extras = ["rsa"]}
 redis = "8.1.0"
 
+[tool.poetry.group.business]
+optional = true
+
+[tool.poetry.group.business.dependencies]
+sqlalchemy = "2.0.43"
+psycopg = {version = "3.3.9", extras = ["binary"]}
+alembic = "1.20.1"
+
 [[tool.poetry.source]]
 name = "tsinghua"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
