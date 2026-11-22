@@ -19,8 +19,8 @@ class BusinessApiTests(BusinessDatabaseTest):
         lifespan = app.router.lifespan_context(app)
         await lifespan.__aenter__()
         self.addAsyncCleanup(lifespan.__aexit__, None, None, None)
-        self.a = AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1")
-        self.b = AsyncClient(transport=ASGITransport(app=app), base_url="http://127.0.0.1")
+        self.a = AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://127.0.0.1")
+        self.b = AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://127.0.0.1")
         self.addAsyncCleanup(self.a.aclose)
         self.addAsyncCleanup(self.b.aclose)
 
@@ -85,3 +85,18 @@ class BusinessApiTests(BusinessDatabaseTest):
                 .values(expires_at=datetime.now(timezone.utc) - timedelta(seconds=1)),
             )
         self.assertEqual((await self.a.get("/api/me/itineraries")).status_code, 401)
+
+    async def test_postgres_invalid_text_returns_422(self):
+        login = await self.a.post("/api/auth/login", json={
+            "username": "demo-a\u0000", "password": PASSWORDS[0],
+        })
+        self.assertEqual(login.status_code, 422)
+        self.assertNotIn(PASSWORDS[0], login.text)
+        await self.login(self.a, 0)
+        thread_id = await self.create_thread(self.a)
+        bad = await self.a.post(f"/api/threads/{thread_id}/messages", json={
+            "content": "invalid\u0000text",
+        })
+        self.assertEqual(bad.status_code, 422)
+        thread = await self.a.get(f"/api/threads/{thread_id}")
+        self.assertEqual(thread.json()["messages"], [])

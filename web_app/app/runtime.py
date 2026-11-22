@@ -23,6 +23,7 @@ from customer_support_chat.app.business.repository import BusinessRepository
 COOKIE_NAME = "travel_session"
 SESSION_SECONDS = 8 * 60 * 60
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
+POSTGRES_TEXT = r"^[^\x00]+$"
 
 
 class RequestBody(BaseModel):
@@ -30,12 +31,12 @@ class RequestBody(BaseModel):
 
 
 class LoginRequest(RequestBody):
-    username: Annotated[str, StringConstraints(min_length=1, max_length=80, strip_whitespace=True)]
+    username: Annotated[str, StringConstraints(min_length=1, max_length=80, strip_whitespace=True, pattern=POSTGRES_TEXT)]
     password: Annotated[str, StringConstraints(min_length=1, max_length=256)]
 
 
 class MessageRequest(RequestBody):
-    content: Annotated[str, StringConstraints(min_length=1, max_length=4000, strip_whitespace=True)]
+    content: Annotated[str, StringConstraints(min_length=1, max_length=4000, strip_whitespace=True, pattern=POSTGRES_TEXT)]
 
 
 @dataclass(frozen=True)
