@@ -4,10 +4,13 @@ from pathlib import Path
 import sys
 import unittest
 from unittest.mock import patch
+from uuid import UUID
+
+import httpx
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from check_local_runtime import ProbeFailure, main, report_action, require_probe_value, verify_mysql_grants
+from check_local_runtime import ProbeFailure, main, qdrant_probe, report_action, require_probe_value, verify_mysql_grants
 
 
 class LocalRuntimeTests(unittest.TestCase):
@@ -58,3 +61,32 @@ class LocalRuntimeTests(unittest.TestCase):
         for scope in ("*.*", "other.*", chr(96) + "travel_faq" + chr(96) + ".*"):
             with self.subTest(scope=scope), self.assertRaises(ProbeFailure):
                 verify_mysql_grants(["GRANT ALL PRIVILEGES ON " + scope + principal], "travel_faq")
+
+    def test_mysql_literal_mode_rejects_another_schema_spelling(self):
+        quote = chr(96)
+        suffix = ".* TO 'fixture'@'localhost'"
+        literal = "GRANT ALL PRIVILEGES ON " + quote + "travel_faq" + quote + suffix
+        escaped = "GRANT ALL PRIVILEGES ON " + quote + r"travel\_faq" + quote + suffix
+        verify_mysql_grants([literal], "travel_faq", literal_wildcards=True)
+        with self.assertRaises(ProbeFailure):
+            verify_mysql_grants([escaped], "travel_faq", literal_wildcards=True)
+
+    def test_qdrant_verifies_after_recovery(self):
+        marker = UUID("16f98a7d-0d78-4676-add7-841810b5c776")
+        calls = []
+
+        def response(request):
+            calls.append(request.url.path)
+            if request.url.path == "/readyz":
+                return httpx.Response(503 if len(calls) == 1 else 200)
+            return httpx.Response(200, json={"result": {
+                "id": str(marker), "payload": {"marker": str(marker)},
+            }})
+
+        transport = httpx.MockTransport(response)
+        client = httpx.Client(base_url="http://127.0.0.1", transport=transport)
+        with patch("check_local_runtime.qdrant_client", return_value=client):
+            qdrant_probe({}, "verify", marker)
+        self.assertEqual(calls, [
+            "/readyz", "/readyz", f"/collections/p1_runtime_probe_{marker.hex}/points/{marker}",
+        ])

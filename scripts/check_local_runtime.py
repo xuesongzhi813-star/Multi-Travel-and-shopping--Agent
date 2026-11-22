@@ -5,6 +5,7 @@ from collections.abc import Callable
 import os
 from pathlib import Path
 import re
+from time import monotonic, sleep
 from uuid import UUID, uuid4
 
 from dotenv import dotenv_values
@@ -120,6 +121,18 @@ def check_qdrant(settings: dict[str, str]) -> None:
         client.get("/readyz").raise_for_status()
 
 
+def wait_for_qdrant(client: httpx.Client) -> None:
+    deadline = monotonic() + 30
+    while (remaining := deadline - monotonic()) > 0:
+        try:
+            if client.get("/readyz", timeout=min(TIMEOUT, remaining)).is_success:
+                return
+        except httpx.TransportError:
+            pass
+        sleep(min(0.5, max(0, deadline - monotonic())))
+    raise ProbeFailure("Qdrant readiness timed out after 30 seconds")
+
+
 def qdrant_probe(settings: dict[str, str], action: str, probe_id: UUID) -> None:
     collection = f"/collections/p1_runtime_probe_{probe_id.hex}"
     marker = str(probe_id)
@@ -131,6 +144,7 @@ def qdrant_probe(settings: dict[str, str], action: str, probe_id: UUID) -> None:
                 json={"points": [{"id": marker, "vector": [1.0, 0.0], "payload": {"marker": marker}}]},
             ).raise_for_status()
         elif action == "verify":
+            wait_for_qdrant(client)
             response = client.get(f"{collection}/points/{marker}").raise_for_status()
             point = response.json()["result"]
             require_probe_value(point["id"], marker)
@@ -161,10 +175,10 @@ def check_redis(settings: dict[str, str]) -> None:
 
 def verify_mysql_grants(grants: list[str], database: str, *, literal_wildcards: bool = False) -> None:
     exact = database.replace("\\", "\\\\").replace("_", r"\_").replace("%", r"\%")
-    scopes = {exact, database} if literal_wildcards else {exact}
-    quoted_scopes = [chr(96) + scope.replace(chr(96), chr(96) * 2) + chr(96) for scope in scopes]
+    scope = database if literal_wildcards else exact
+    quoted_scope = chr(96) + scope.replace(chr(96), chr(96) * 2) + chr(96)
     pattern = re.compile(
-        r"^GRANT ([A-Z, ]+) ON (?:" + "|".join(map(re.escape, sorted(quoted_scopes))) + r")\.\* TO ",
+        r"^GRANT ([A-Z, ]+) ON " + re.escape(quoted_scope) + r"\.\* TO ",
         re.IGNORECASE,
     )
     permissions = set()

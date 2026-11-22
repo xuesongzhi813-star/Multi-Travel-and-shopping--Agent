@@ -34,7 +34,7 @@ poetry run python scripts/check_local_runtime.py check
 
 MySQL 验收需要本机项目库和专用账号，并在 `.env` 配置 `MYSQL_DATABASE`、`MYSQL_USER`、`MYSQL_PASSWORD`。直接授予项目库 `SELECT`、`INSERT`、`UPDATE`、`DELETE`、`CREATE`、`ALTER`、`DROP`、`INDEX` 和 `CREATE TEMPORARY TABLES` 权限即可。若 MySQL 使用数据库名通配语义，按官方语法把项目库名中的下划线或百分号转义，授权到实际库名。验收分别输出四个服务的结果，MySQL 缺项会返回非零。
 
-使用同一个唯一 ID 验收 PostgreSQL 和 Qdrant 的持久化。若中途失败，保留该 ID，检查服务后运行 `cleanup` 清理探针。
+使用同一个唯一 ID 验收 PostgreSQL 和 Qdrant 的持久化。验证脚本会等待 Qdrant 就绪，最多等待 30 秒。若中途失败，保留该 ID，检查服务后运行 `cleanup` 清理探针。
 
 ```powershell
 $probe = [guid]::NewGuid().ToString()
