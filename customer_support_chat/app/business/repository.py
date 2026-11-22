@@ -46,6 +46,24 @@ class BusinessRepository:
             await connection.execute(self.db.threads.insert().values(id=thread_id, user_id=user_id))
         return thread_id
 
+    async def owns_thread(self, user_id: UUID, thread_id: UUID) -> bool:
+        thread = self.db.threads
+        async with self.engine.connect() as connection:
+            row = await connection.scalar(
+                select(thread.c.id).where(thread.c.id == thread_id, thread.c.user_id == user_id),
+            )
+        return row is not None
+
+    async def read_owned_message(self, user_id: UUID, thread_id: UUID, message_id: UUID) -> str | None:
+        thread, message = self.db.threads, self.db.messages
+        query = (
+            select(message.c.content)
+            .join(thread, thread.c.id == message.c.thread_id)
+            .where(thread.c.id == thread_id, thread.c.user_id == user_id, message.c.id == message_id)
+        )
+        async with self.engine.connect() as connection:
+            return await connection.scalar(query)
+
     async def load_thread(self, user_id: UUID, thread_id: UUID):
         thread, message = self.db.threads, self.db.messages
         query = (

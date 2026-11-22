@@ -11,13 +11,19 @@ from typing import Annotated
 from uuid import UUID
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
+from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from customer_support_chat.app.business.auth import hash_password, verify_password
 from customer_support_chat.app.business.database import DatabaseSettings, create_engine, read_settings
+from psycopg import Error as PostgresError
+
 from customer_support_chat.app.business.repository import BusinessRepository
+from customer_support_chat.app.workflow.checkpoints import GraphUnavailable, open_graph_runtime, read_checkpoint_schema
+from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
+from customer_support_chat.app.workflow.thread_lock import try_thread_lock
 
 
 COOKIE_NAME = "travel_session"
@@ -72,15 +78,23 @@ async def get_principal(
 Identity = Annotated[Principal, Depends(get_principal)]
 
 
-def create_app(settings: DatabaseSettings | None = None) -> FastAPI:
+def create_app(
+    settings: DatabaseSettings | None = None, *, checkpoint_schema: str | None = None,
+) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         config = settings or read_settings()
+        schema = checkpoint_schema if checkpoint_schema is not None else read_checkpoint_schema(config.schema)
         engine = create_engine(config)
         try:
-            app.state.repository = BusinessRepository(engine, config.schema)
+            repository = BusinessRepository(engine, config.schema)
+            app.state.repository = repository
+            app.state.database_settings = config
+            app.state.thread_lock_slots = asyncio.Semaphore(4)
             app.state.dummy_password_hash = await asyncio.to_thread(hash_password, token_urlsafe(32))
-            yield
+            async with open_graph_runtime(config, schema, repository.read_owned_message) as graph:
+                app.state.graph = graph
+                yield
         finally:
             await engine.dispose()
 
@@ -125,18 +139,49 @@ def create_app(settings: DatabaseSettings | None = None) -> FastAPI:
         return {"thread_id": await repository.create_thread(identity.user_id)}
 
     @app.get("/api/threads/{thread_id}")
-    async def get_thread(thread_id: UUID, repository: Database, identity: Identity):
+    async def get_thread(thread_id: UUID, request: Request, repository: Database, identity: Identity):
+        if not await repository.owns_thread(identity.user_id, thread_id):
+            raise HTTPException(404, "Thread not found")
+        graph_unavailable = False
+        try:
+            graph = await request.app.state.graph.read(thread_id)
+        except GraphUnavailable:
+            graph_unavailable = True
+            graph = None
         thread = await repository.load_thread(identity.user_id, thread_id)
         if thread is None:
             raise HTTPException(404, "Thread not found")
-        return thread
+        if graph_unavailable:
+            return JSONResponse(
+                status_code=503, content=jsonable_encoder(thread | {"detail": "Graph state unavailable"}),
+            )
+        return thread | {"graph": graph}
 
     @app.post("/api/threads/{thread_id}/messages", status_code=201)
-    async def append_message(thread_id: UUID, body: MessageRequest, repository: Database, identity: Identity):
-        message_id = await repository.append_message(identity.user_id, thread_id, body.content)
-        if message_id is None:
+    async def append_message(
+        thread_id: UUID, body: MessageRequest, request: Request, repository: Database, identity: Identity,
+    ):
+        if not await repository.owns_thread(identity.user_id, thread_id):
             raise HTTPException(404, "Thread not found")
-        return {"message_id": message_id, "status": "recorded"}
+        message_id = None
+        state = request.app.state
+        try:
+            async with state.thread_lock_slots, try_thread_lock(state.database_settings, thread_id) as acquired:
+                if not acquired:
+                    raise HTTPException(409, "Thread is busy")
+                message_id = await repository.append_message(identity.user_id, thread_id, body.content)
+                if message_id is None:
+                    raise HTTPException(404, "Thread not found")
+                result = await state.graph.invoke(identity.user_id, thread_id, message_id)
+        except (GraphUnavailable, PostgresError):
+            failure = {"detail": "Graph turn unavailable"}
+            if message_id is not None:
+                failure["message_id"] = str(message_id)
+            return JSONResponse(status_code=503, content=failure)
+        response = {"message_id": message_id, "status": result["status"]}
+        if result["status"] == "rejected":
+            response["reply"] = REFUSAL_MESSAGE
+        return response
 
     @app.get("/api/me/itineraries")
     async def itineraries(repository: Database, identity: Identity):

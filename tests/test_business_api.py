@@ -4,8 +4,10 @@ from zoneinfo import ZoneInfo
 
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
+from sqlalchemy.schema import DropSchema
 
 from customer_support_chat.app.business.demo_seed import seed_demo
+from customer_support_chat.app.workflow.checkpoints import prepare_checkpoints
 from test_business_migrations import BusinessDatabaseTest
 from test_business_seed import PASSWORDS
 from web_app.app.runtime import COOKIE_NAME, create_app
@@ -15,7 +17,10 @@ class BusinessApiTests(BusinessDatabaseTest):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         await seed_demo(self.engine, self.settings.schema, PASSWORDS)
-        app = create_app(self.settings)
+        self.checkpoint_schema = f"test_graph_{uuid4().hex}"
+        self.addAsyncCleanup(self.remove_checkpoint_schema)
+        await prepare_checkpoints(self.settings, self.checkpoint_schema)
+        app = create_app(self.settings, checkpoint_schema=self.checkpoint_schema)
         lifespan = app.router.lifespan_context(app)
         await lifespan.__aenter__()
         self.addAsyncCleanup(lifespan.__aexit__, None, None, None)
@@ -23,6 +28,10 @@ class BusinessApiTests(BusinessDatabaseTest):
         self.b = AsyncClient(transport=ASGITransport(app=app, raise_app_exceptions=False), base_url="http://127.0.0.1")
         self.addAsyncCleanup(self.a.aclose)
         self.addAsyncCleanup(self.b.aclose)
+
+    async def remove_checkpoint_schema(self):
+        async with self.engine.begin() as connection:
+            await connection.execute(DropSchema(self.checkpoint_schema, cascade=True, if_exists=True))
 
     async def login(self, client, index):
         response = await client.post(
