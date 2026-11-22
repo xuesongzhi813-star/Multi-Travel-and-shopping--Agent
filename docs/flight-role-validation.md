@@ -16,6 +16,6 @@ poetry -P flight_role_validation run python -B -m unittest discover -s flight_ro
 poetry -P flight_role_validation run python -B -m flight_role_validation --live
 ```
 
-单次验收最多发出三次请求，每次最多 384 个输出 token，15 秒单请求限制，40 秒角色总时限。SDK 禁用自动重试，禁止重定向。输出记录实际尝试数、HTTP 状态、可用 token 用量、核验结果和合成航班交接。失败或达到上限时，保留结果并停止追加调用。
+单次验收最多发出三次请求，每次最多 384 个输出 token，15 秒单请求限制，40 秒总时限（包含数据准备与清理）。SDK 禁用自动重试，禁止重定向。输出记录实际尝试数、HTTP 状态、可用 token 用量、核验结果和合成航班交接。失败或达到上限时，保留结果并停止追加调用。
 
 目标航班 `DEMO-A1` 的交接到达机场为 `ZRH`，时区为 `Europe/Zurich`，当地到达日期为 `2026-12-15`。

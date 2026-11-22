@@ -103,3 +103,34 @@ class LiveBudgetTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(budget.attempts, 3)
         self.assertTrue(budget.sequential_lookup_verified(result.handoff.source_tool_call_id))
         self.assertEqual(budget.usage_totals()["total_tokens"], 45)
+
+    async def test_live_trace_requires_successful_second_lookup(self):
+        from flight_role_validation.__main__ import SYNTHETIC_INPUT, synthetic_lookup
+        from flight_role_validation.role import run_flight_role
+
+        replies = iter((
+            ("first", "lookup_flight", "DEMO-A1"),
+            ("second", "lookup_flight", "DEMO-A2"),
+            ("last", "HandoffCandidate", "DEMO-A1"),
+        ))
+        async def reply(request):
+            call_id, name, reference = next(replies)
+            body = completion()
+            body["choices"] = [{"index": 0, "finish_reason": "tool_calls", "message": {
+                "role": "assistant", "content": None, "tool_calls": [{
+                    "id": call_id, "type": "function",
+                    "function": {"name": name, "arguments": json.dumps({"reference": reference})},
+                }],
+            }}]
+            return httpx.Response(200, json=body)
+
+        async def lookup(user, reference):
+            if reference == "DEMO-A2":
+                return None
+            return await synthetic_lookup(user, reference)
+
+        async with open_live_model("synthetic-key", transport=httpx.MockTransport(reply)) as pair:
+            model, budget = pair
+            result = await run_flight_role(SYNTHETIC_INPUT, model=model, lookup=lookup)
+        self.assertEqual(result.status, "verified")
+        self.assertFalse(budget.sequential_lookup_verified(result.handoff.source_tool_call_id))

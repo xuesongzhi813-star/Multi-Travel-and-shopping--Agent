@@ -24,6 +24,7 @@ USAGE_FIELDS = ("prompt_tokens", "completion_tokens", "total_tokens")
 @dataclass
 class RequestObservation:
     returned_tool_ids: tuple[str, ...]
+    returned_flights: tuple[tuple[str, str], ...] = ()
     status: int | None = None
     calls: tuple[tuple[str, str, str], ...] = ()
     usage: dict[str, int] = field(default_factory=dict)
@@ -50,9 +51,12 @@ class RequestBudgetTransport(httpx.AsyncBaseTransport):
         if (payload.get("model") != MODEL_NAME or payload.get("max_tokens") != MAX_OUTPUT_TOKENS
                 or payload.get("thinking") != {"type": "disabled"} or payload.get("stream")):
             raise httpx.RequestError("DeepSeek validation settings differ from approved bounds", request=request)
-        observation = RequestObservation(tuple(
-            message["tool_call_id"] for message in payload["messages"] if message["role"] == "tool"
-        ))
+        tool_results = [message for message in payload["messages"] if message["role"] == "tool"]
+        observation = RequestObservation(
+            tuple(message["tool_call_id"] for message in tool_results),
+            tuple((message["tool_call_id"], reference) for message in tool_results
+                  if (reference := self._flight_reference(message.get("content"))) is not None),
+        )
         self.observations.append(observation)
         response = None
         try:
@@ -68,6 +72,17 @@ class RequestBudgetTransport(httpx.AsyncBaseTransport):
         if response.is_success:
             self._record_completion(response, observation)
         return response
+
+    @staticmethod
+    def _flight_reference(content: str | None) -> str | None:
+        try:
+            facts = json.loads(content)
+            keys = ("reference", "arrival_airport", "arrival_at_utc", "arrival_timezone")
+            if all(isinstance(facts[key], str) and facts[key] for key in keys):
+                return facts["reference"]
+        except (TypeError, ValueError, KeyError):
+            pass
+        return None
 
     @staticmethod
     def _record_completion(response: httpx.Response, observation: RequestObservation) -> None:
@@ -108,9 +123,9 @@ class RequestBudgetTransport(httpx.AsyncBaseTransport):
             and first_name == second_name == "lookup_flight"
             and (first_ref, second_ref, third_ref) == ("DEMO-A1", "DEMO-A2", "DEMO-A1")
             and third_name == "HandoffCandidate"
-            and first_id in second.returned_tool_ids
+            and (first_id, first_ref) in second.returned_flights
             and second_id not in second.returned_tool_ids
-            and second_id in third.returned_tool_ids
+            and (second_id, second_ref) in third.returned_flights
         )
 
     async def aclose(self) -> None:

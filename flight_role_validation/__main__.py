@@ -5,7 +5,7 @@ import asyncio
 from collections.abc import AsyncIterator, Sequence
 from contextlib import asynccontextmanager
 from dataclasses import asdict, replace
-from datetime import datetime
+from datetime import date, datetime
 import json
 import os
 from secrets import token_urlsafe
@@ -22,6 +22,8 @@ from .live import MODEL_NAME, open_live_model
 from .role import FlightRoleInput, run_flight_role
 
 
+LIVE_TIMEOUT = 40
+CLEANUP_RESERVE = 5
 DEMO_USER = DEMO_USERS[0][0]
 SYNTHETIC_INPUT = FlightRoleInput(
     DEMO_USER,
@@ -41,13 +43,14 @@ async def synthetic_lookup(user_id: UUID, reference: str) -> FlightFacts | None:
 
 
 @asynccontextmanager
-async def temporary_repository() -> AsyncIterator[BusinessRepository]:
+async def temporary_repository(work_deadline: float) -> AsyncIterator[BusinessRepository]:
     config = replace(read_settings(), schema=f"p4_live_{uuid4().hex}")
     engine = create_engine(config)
     try:
-        await migrate_business(engine, config.schema)
-        await seed_demo(engine, config.schema, (token_urlsafe(24), token_urlsafe(24)))
-        yield BusinessRepository(engine, config.schema)
+        async with asyncio.timeout_at(work_deadline):
+            await migrate_business(engine, config.schema)
+            await seed_demo(engine, config.schema, (token_urlsafe(24), token_urlsafe(24)))
+            yield BusinessRepository(engine, config.schema)
     finally:
         try:
             async with engine.begin() as connection:
@@ -74,20 +77,30 @@ async def run_live_validation() -> int:
         return 1
 
     report = {"mode": "live", "model": MODEL_NAME, "provider_requests": 0, "passed": False}
+    deadline = asyncio.get_running_loop().time() + LIVE_TIMEOUT
+    work_deadline = deadline - min(CLEANUP_RESERVE, LIVE_TIMEOUT / 8)
     try:
-        async with temporary_repository() as repository, open_live_model(api_key) as (model, budget):
-            try:
-                result = await run_flight_role(
-                    SYNTHETIC_INPUT, model=model, lookup=build_repository_lookup(repository),
-                )
-                report["result"] = asdict(result)
-                report["passed"] = bool(
-                    result.handoff and budget.sequential_lookup_verified(result.handoff.source_tool_call_id)
-                )
-            finally:
-                report["provider_requests"] = budget.attempts
-                report["http_statuses"] = [item.status for item in budget.observations]
-                report["usage"] = budget.usage_totals()
+        async with asyncio.timeout_at(deadline):
+            async with temporary_repository(work_deadline) as repository, open_live_model(api_key) as (model, budget):
+                try:
+                    result = await run_flight_role(
+                        SYNTHETIC_INPUT, model=model, lookup=build_repository_lookup(repository),
+                    )
+                    report["result"] = asdict(result)
+                    handoff = result.handoff
+                    report["passed"] = bool(
+                        handoff and (handoff.reference, handoff.arrival_airport, handoff.arrival_date_local,
+                                     handoff.arrival_timezone)
+                        == ("DEMO-A1", "ZRH", date(2026, 12, 15), "Europe/Zurich")
+                        and budget.sequential_lookup_verified(handoff.source_tool_call_id)
+                    )
+                finally:
+                    report["provider_requests"] = budget.attempts
+                    report["http_statuses"] = [item.status for item in budget.observations]
+                    report["usage"] = budget.usage_totals()
+    except TimeoutError:
+        report["passed"] = False
+        report["error"] = "timeout"
     except Exception as error:
         report["passed"] = False
         report["error"] = type(error).__name__
