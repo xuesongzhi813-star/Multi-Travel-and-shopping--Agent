@@ -20,3 +20,26 @@ docker compose --env-file .env -f compose.local.yml stop
 ```
 
 PostgreSQL 和 Qdrant 分别保存于 `postgres-data` 和 `qdrant-data`。Redis 用于可重建的缓存。MySQL 由 Windows 服务管理。
+
+## 验收
+
+在 Windows 本机安装锁定的验收驱动：
+
+```powershell
+poetry check --lock
+poetry sync --with local-runtime --no-root
+poetry run python -m pip check
+poetry run python scripts/check_local_runtime.py check
+```
+
+MySQL 验收需要本机项目库和专用账号，并在 `.env` 配置 `MYSQL_DATABASE`、`MYSQL_USER`、`MYSQL_PASSWORD`。直接授予项目库 `SELECT`、`INSERT`、`UPDATE`、`DELETE`、`CREATE`、`ALTER`、`DROP`、`INDEX` 和 `CREATE TEMPORARY TABLES` 权限即可。若 MySQL 使用数据库名通配语义，按官方语法把项目库名中的下划线或百分号转义，授权到实际库名。验收分别输出四个服务的结果，MySQL 缺项会返回非零。
+
+使用同一个唯一 ID 验收 PostgreSQL 和 Qdrant 的持久化。若中途失败，保留该 ID，检查服务后运行 `cleanup` 清理探针。
+
+```powershell
+$probe = [guid]::NewGuid().ToString()
+poetry run python scripts/check_local_runtime.py write --probe-id $probe
+docker compose --env-file .env -f compose.local.yml up -d --force-recreate --wait --wait-timeout 90 postgres qdrant
+poetry run python scripts/check_local_runtime.py verify --probe-id $probe
+poetry run python scripts/check_local_runtime.py cleanup --probe-id $probe
+```

@@ -29,6 +29,14 @@ apscheduler = "^3.11.0"
 reportlab = "^4.4.3"
 gohumanloop = "^0.0.9"
 
+[tool.poetry.group.local-runtime]
+optional = true
+
+[tool.poetry.group.local-runtime.dependencies]
+psycopg = {version = "3.3.9", extras = ["binary"]}
+pymysql = {version = "1.2.4", extras = ["rsa"]}
+redis = "8.1.0"
+
 [[tool.poetry.source]]
 name = "tsinghua"
 url = "https://pypi.tuna.tsinghua.edu.cn/simple"
