@@ -94,10 +94,10 @@ class GraphApiTests(BusinessDatabaseTest):
         started, release = asyncio.Event(), asyncio.Event()
         original_invoke = self.graph.invoke
 
-        async def pause_invoke(*args):
+        async def pause_invoke(*args, **kwargs):
             started.set()
             await release.wait()
-            return await original_invoke(*args)
+            return await original_invoke(*args, **kwargs)
 
         with patch.object(self.graph, "invoke", side_effect=pause_invoke):
             first = asyncio.create_task(self.send(self.a, path))
@@ -135,3 +135,88 @@ class GraphApiTests(BusinessDatabaseTest):
         self.assertNotIn("graph", state)
         self.assertEqual(state["messages"][0]["message_id"], failed.json()["message_id"])
         self.assertEqual((await self.send(self.a, path)).status_code, 201)
+
+    async def test_disconnected_lock_holder_cannot_overwrite_new_turn(self):
+        from hashlib import blake2b
+        from psycopg import AsyncConnection
+        from customer_support_chat.app.workflow.checkpoints import connection_kwargs
+
+        path = await self.thread(self.a)
+        thread_id = UUID(path.rsplit("/", 1)[-1])
+        peer, _ = await self.client(0)
+        entered, resume = asyncio.Event(), asyncio.Event()
+        original = self.graph.invoke
+
+        async def pause(*args, **kwargs):
+            entered.set()
+            await resume.wait()
+            return await original(*args, **kwargs)
+
+        key = int.from_bytes(
+            blake2b(f"travel-turn:{self.settings.schema}:{thread_id}".encode(), digest_size=8).digest(),
+            "big", signed=True,
+        )
+        with patch.object(self.graph, "invoke", side_effect=pause):
+            first = asyncio.create_task(self.send(self.a, path))
+            try:
+                await asyncio.wait_for(entered.wait(), 10)
+                async with await AsyncConnection.connect(
+                    **connection_kwargs(self.settings), autocommit=True,
+                ) as connection:
+                    cursor = await connection.execute(
+                        "SELECT pid FROM pg_locks WHERE locktype = 'advisory' AND granted "
+                        "AND database = (SELECT oid FROM pg_database WHERE datname = current_database()) "
+                        "AND classid = %s::oid AND objid = %s::oid AND objsubid = 1",
+                        ((key >> 32) & 0xFFFFFFFF, key & 0xFFFFFFFF),
+                    )
+                    rows = await cursor.fetchall()
+                    self.assertEqual(len(rows), 1)
+                    cursor = await connection.execute("SELECT pg_terminate_backend(%s, 5000)", (rows[0][0],))
+                    self.assertTrue((await cursor.fetchone())[0])
+                second = await self.send(peer, path)
+                self.assertEqual(second.status_code, 201)
+            finally:
+                resume.set()
+                stale = await first
+        self.assertEqual(stale.status_code, 503)
+        state = (await peer.get(path)).json()
+        self.assertEqual(state["graph"]["message_id"], second.json()["message_id"])
+        self.assertEqual(state["graph"]["turn_count"], 1)
+        self.assertEqual(len(state["messages"]), 2)
+
+    async def test_full_process_capacity_never_queues_a_send(self):
+        paths = [await self.thread(self.a) for _ in range(5)]
+        entered = asyncio.Queue()
+        release = asyncio.Event()
+        original = self.graph.invoke
+
+        async def pause(*args, **kwargs):
+            await entered.put(None)
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        with patch.object(self.graph, "invoke", side_effect=pause):
+            running = [asyncio.create_task(self.send(self.a, path)) for path in paths[:4]]
+            try:
+                for _ in running:
+                    await asyncio.wait_for(entered.get(), 10)
+                busy = await asyncio.wait_for(self.send(self.a, paths[0]), 1)
+                full = await asyncio.wait_for(self.send(self.a, paths[4]), 1)
+                self.assertEqual((busy.status_code, full.status_code), (409, 503))
+            finally:
+                release.set()
+                await asyncio.gather(*running)
+        self.assertEqual(len((await self.a.get(paths[0])).json()["messages"]), 1)
+        self.assertEqual((await self.a.get(paths[4])).json()["messages"], [])
+
+    async def test_database_pool_error_after_append_returns_saved_message_id(self):
+        from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+        with patch.object(BusinessRepository, "read_owned_message", side_effect=PoolTimeout):
+            client, _ = await self.client(0)
+            path = await self.thread(client)
+            response = await self.send(client, path)
+        self.assertEqual(response.status_code, 503)
+        history = (await client.get(path)).json()
+        self.assertEqual(history["messages"][0]["message_id"], response.json()["message_id"])
+        self.assertIsNone(history["graph"])

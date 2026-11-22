@@ -14,12 +14,11 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from psycopg import Error as PostgresError
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
 from customer_support_chat.app.business.auth import hash_password, verify_password
 from customer_support_chat.app.business.database import DatabaseSettings, create_engine, read_settings
-from psycopg import Error as PostgresError
-
 from customer_support_chat.app.business.repository import BusinessRepository
 from customer_support_chat.app.workflow.checkpoints import GraphUnavailable, open_graph_runtime, read_checkpoint_schema
 from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
@@ -28,6 +27,7 @@ from customer_support_chat.app.workflow.thread_lock import try_thread_lock
 
 COOKIE_NAME = "travel_session"
 SESSION_SECONDS = 8 * 60 * 60
+MAX_ACTIVE_TURNS = 4
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 POSTGRES_TEXT = r"^[^\x00]+$"
 
@@ -90,7 +90,8 @@ def create_app(
             repository = BusinessRepository(engine, config.schema)
             app.state.repository = repository
             app.state.database_settings = config
-            app.state.thread_lock_slots = asyncio.Semaphore(4)
+            app.state.checkpoint_schema = schema
+            app.state.active_threads = set()
             app.state.dummy_password_hash = await asyncio.to_thread(hash_password, token_urlsafe(32))
             async with open_graph_runtime(config, schema, repository.read_owned_message) as graph:
                 app.state.graph = graph
@@ -165,19 +166,27 @@ def create_app(
             raise HTTPException(404, "Thread not found")
         message_id = None
         state = request.app.state
+        active_threads = state.active_threads
+        if thread_id in active_threads:
+            raise HTTPException(409, "Thread is busy")
+        if len(active_threads) >= MAX_ACTIVE_TURNS:
+            raise HTTPException(503, "Graph turn capacity reached")
+        active_threads.add(thread_id)
         try:
-            async with state.thread_lock_slots, try_thread_lock(state.database_settings, thread_id) as acquired:
-                if not acquired:
+            async with try_thread_lock(state.database_settings, state.checkpoint_schema, thread_id) as connection:
+                if connection is None:
                     raise HTTPException(409, "Thread is busy")
                 message_id = await repository.append_message(identity.user_id, thread_id, body.content)
                 if message_id is None:
                     raise HTTPException(404, "Thread not found")
-                result = await state.graph.invoke(identity.user_id, thread_id, message_id)
+                result = await state.graph.invoke(identity.user_id, thread_id, message_id, connection=connection)
         except (GraphUnavailable, PostgresError):
             failure = {"detail": "Graph turn unavailable"}
             if message_id is not None:
                 failure["message_id"] = str(message_id)
             return JSONResponse(status_code=503, content=failure)
+        finally:
+            active_threads.remove(thread_id)
         response = {"message_id": message_id, "status": result["status"]}
         if result["status"] == "rejected":
             response["reply"] = REFUSAL_MESSAGE

@@ -13,6 +13,7 @@ from langgraph.graph.state import CompiledStateGraph
 from psycopg import AsyncConnection, Error, sql
 from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
+from sqlalchemy.exc import DBAPIError, TimeoutError as DatabasePoolTimeout
 
 from customer_support_chat.app.business.database import DatabaseSettings, local_value, validate_schema
 from .parent_graph import GraphResult, MessageLoader, build_parent_graph
@@ -80,9 +81,10 @@ async def prepare_checkpoints(settings: DatabaseSettings, schema: str) -> None:
 
 
 class GraphRuntime:
-    def __init__(self, saver: AsyncPostgresSaver, graph: CompiledStateGraph):
+    def __init__(self, saver: AsyncPostgresSaver, load_message: MessageLoader):
         self.saver = saver
-        self.graph = graph
+        self.load_message = load_message
+        self.graph: CompiledStateGraph = build_parent_graph(load_message, saver)
 
     async def read(self, thread_id: UUID) -> GraphResult | None:
         try:
@@ -92,7 +94,16 @@ class GraphRuntime:
             raise GraphUnavailable("Could not read graph state") from error
         return None if saved is None else saved.checkpoint["channel_values"].get("completed")
 
-    async def invoke(self, user_id: UUID, thread_id: UUID, message_id: UUID) -> GraphResult:
+    async def invoke(
+        self, user_id: UUID, thread_id: UUID, message_id: UUID, *, connection: AsyncConnection | None = None,
+    ) -> GraphResult:
+        if connection is not None:
+            saver = AsyncPostgresSaver(connection, serde=CheckpointJsonSerializer())
+            runtime = GraphRuntime(saver, self.load_message)
+            return await runtime._invoke(user_id, thread_id, message_id)
+        return await self._invoke(user_id, thread_id, message_id)
+
+    async def _invoke(self, user_id: UUID, thread_id: UUID, message_id: UUID) -> GraphResult:
         try:
             async with asyncio.timeout(20):
                 prior = await self.read(thread_id)
@@ -104,7 +115,7 @@ class GraphRuntime:
                     {"configurable": {"thread_id": str(thread_id)}},
                 )
                 result = await self.read(thread_id)
-        except (Error, TimeoutError, LookupError, ValueError) as error:
+        except (Error, TimeoutError, LookupError, ValueError, DBAPIError, DatabasePoolTimeout) as error:
             raise GraphUnavailable("Could not process graph turn") from error
         if result is None or result["message_id"] != str(message_id):
             raise GraphUnavailable("Graph turn was not confirmed")
@@ -121,4 +132,4 @@ async def open_graph_runtime(
     )
     async with pool:
         saver = AsyncPostgresSaver(pool, serde=CheckpointJsonSerializer())
-        yield GraphRuntime(saver, build_parent_graph(load_message, saver))
+        yield GraphRuntime(saver, load_message)
