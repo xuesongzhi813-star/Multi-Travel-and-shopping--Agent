@@ -17,9 +17,15 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from psycopg import Error as PostgresError
-from pydantic import BaseModel, ConfigDict, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from customer_support_chat.app.business.booking import (
+    BookingDecision, BookingOwner, BookingScope, BookingSelection, ProposalConflict, ProposalNotFound,
+)
+from customer_support_chat.app.business.booking_repository import BookingRepository
+from customer_support_chat.app.tooling.audit import PostgresAuditSink
+from customer_support_chat.app.tooling.booking import ApprovedBookingExecutor
 from customer_support_chat.app.business.auth import hash_password, verify_password
 from customer_support_chat.app.business.database import DatabaseSettings, create_engine, read_settings
 from customer_support_chat.app.business.repository import BusinessRepository
@@ -31,6 +37,7 @@ from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
 from customer_support_chat.app.workflow.thread_lock import try_thread_lock
 
 
+from .bookings import BookingCoordinator
 from .local_tools import FlightSettings, LocalToolError, LocalToolTimeout, ROLE_PYTHON, run_local_tool
 from .operations import error_response, http_error, observe_request, postgres_schema_ready, qdrant_ready, redis_ready
 
@@ -63,6 +70,15 @@ class AirportRequest(RequestBody):
 
 class MessageRequest(RequestBody):
     content: Annotated[str, StringConstraints(min_length=1, max_length=4000, strip_whitespace=True, pattern=POSTGRES_TEXT)]
+
+
+class HotelProposalRequest(RequestBody):
+    message_id: UUID
+    option_index: Annotated[int, Field(strict=True, ge=0, le=4)]
+
+
+class BookingDecisionRequest(RequestBody):
+    decision: BookingDecision
 
 
 @dataclass(frozen=True)
@@ -98,6 +114,32 @@ async def get_principal(
 Identity = Annotated[Principal, Depends(get_principal)]
 
 
+@asynccontextmanager
+async def locked_turn(state, thread_id: UUID):
+    if thread_id in state.active_threads:
+        raise HTTPException(409, "Thread is busy")
+    if len(state.active_threads) >= MAX_ACTIVE_TURNS:
+        raise HTTPException(503, "Graph turn capacity reached")
+    state.active_threads.add(thread_id)
+    try:
+        async with try_thread_lock(state.database_settings, state.checkpoint_schema, thread_id) as connection:
+            if connection is None:
+                raise HTTPException(409, "Thread is busy")
+            yield connection
+    finally:
+        state.active_threads.remove(thread_id)
+
+
+def booking_conflict(request: Request, error: ProposalConflict):
+    details = {
+        "booking_pending": "本会话有待处理的预订提案。",
+        "proposal_already_pending": "本会话有待处理的预订提案。",
+        "quote_changed": "演示库存或价格已改变，请重新查询酒店。",
+        "decision_already_recorded": "该提案已有决定。",
+    }
+    return error_response(request, 409, error.code, details.get(error.code, "请重新查询酒店并选择。"))
+
+
 def create_app(
     settings: DatabaseSettings | None = None, *, checkpoint_schema: str | None = None,
 ) -> FastAPI:
@@ -109,6 +151,9 @@ def create_app(
         engine = create_engine(config)
         try:
             repository = BusinessRepository(engine, config.schema)
+            booking_repository = BookingRepository(config)
+            booking_executor = ApprovedBookingExecutor(booking_repository, PostgresAuditSink(engine, config.schema))
+            app.state.bookings = BookingCoordinator(booking_repository)
             app.state.repository = repository
             app.state.database_settings = config
             app.state.checkpoint_schema = schema
@@ -173,6 +218,7 @@ def create_app(
 
             async with open_graph_runtime(
                 config, schema, repository.read_owned_message, flight_lookup=flight_lookup, hotel_search=hotel_search,
+                booking_repository=booking_repository, booking_executor=booking_executor,
             ) as graph:
                 app.state.graph = graph
                 yield
@@ -294,9 +340,12 @@ def create_app(
         if not await repository.owns_thread(identity.user_id, thread_id):
             raise HTTPException(404, "Thread not found")
         graph_unavailable = False
+        booking = None
         try:
-            graph = await request.app.state.graph.read(thread_id)
-        except GraphUnavailable:
+            state = request.app.state
+            graph = await state.graph.read(thread_id)
+            booking = await state.bookings.projection(state.graph, BookingOwner(identity.user_id, thread_id))
+        except (GraphUnavailable, PostgresError):
             graph_unavailable = True
             graph = None
         thread = await repository.load_thread(identity.user_id, thread_id)
@@ -307,7 +356,58 @@ def create_app(
             return JSONResponse(
                 status_code=503, content=jsonable_encoder(thread | {"detail": "Graph state unavailable", "code": "graph_unavailable", "request_id": str(request.state.request_id)}),
             )
-        return thread | {"graph": graph}
+        payload = thread | {"graph": graph}
+        if booking is not None:
+            payload["booking"] = booking
+        return payload
+
+    @app.post("/api/threads/{thread_id}/hotel-proposals", status_code=201)
+    async def create_hotel_proposal(
+        thread_id: UUID, body: HotelProposalRequest, request: Request, repository: Database, identity: Identity,
+    ):
+        if not await repository.owns_thread(identity.user_id, thread_id):
+            raise HTTPException(404, "Thread not found")
+        owner = BookingOwner(identity.user_id, thread_id)
+        selection = BookingSelection(body.message_id, body.option_index)
+        state = request.app.state
+        try:
+            async with locked_turn(state, thread_id) as connection:
+                prior = await state.bookings.repository.find_proposal(owner, selection, connection=connection)
+                proposal = prior or await state.graph.start_proposal(owner, selection, connection=connection)
+            return JSONResponse(
+                status_code=200 if prior is not None else 201,
+                content=proposal.to_json(),
+            )
+        except ProposalNotFound:
+            raise HTTPException(404, "Proposal not found") from None
+        except ProposalConflict as error:
+            return booking_conflict(request, error)
+        except (GraphUnavailable, PostgresError):
+            return error_response(request, 503, "booking_unavailable", "预订提案暂不可用。")
+
+    @app.post("/api/threads/{thread_id}/approvals/{action_id}/decision")
+    async def decide_hotel_proposal(
+        thread_id: UUID, action_id: UUID, body: BookingDecisionRequest, request: Request,
+        repository: Database, identity: Identity,
+    ):
+        if not await repository.owns_thread(identity.user_id, thread_id):
+            raise HTTPException(404, "Thread not found")
+        state = request.app.state
+        scope = BookingScope(BookingOwner(identity.user_id, thread_id), action_id)
+        try:
+            async with locked_turn(state, thread_id) as connection:
+                proposal = await state.bookings.decide(
+                    state.graph, scope, body.decision, connection, request.state.request_id,
+                )
+            return proposal.to_json() | {"resume_required": False}
+        except ProposalNotFound:
+            raise HTTPException(404, "Proposal not found") from None
+        except ProposalConflict as error:
+            return booking_conflict(request, error)
+        except (GraphUnavailable, PostgresError):
+            return error_response(
+                request, 503, "booking_unavailable", "预订处理暂不可用，请刷新会话后继续。", action_id=str(action_id),
+            )
 
     @app.post("/api/threads/{thread_id}/messages", status_code=201)
     async def append_message(
@@ -317,16 +417,11 @@ def create_app(
             raise HTTPException(404, "Thread not found")
         message_id = None
         state = request.app.state
-        active_threads = state.active_threads
-        if thread_id in active_threads:
-            raise HTTPException(409, "Thread is busy")
-        if len(active_threads) >= MAX_ACTIVE_TURNS:
-            raise HTTPException(503, "Graph turn capacity reached")
-        active_threads.add(thread_id)
         try:
-            async with try_thread_lock(state.database_settings, state.checkpoint_schema, thread_id) as connection:
-                if connection is None:
-                    raise HTTPException(409, "Thread is busy")
+            async with locked_turn(state, thread_id) as connection:
+                await state.bookings.before_message(
+                    state.graph, BookingOwner(identity.user_id, thread_id), connection, request.state.request_id,
+                )
                 message_id = await repository.append_message(identity.user_id, thread_id, body.content)
                 if message_id is None:
                     raise HTTPException(404, "Thread not found")
@@ -335,11 +430,11 @@ def create_app(
                     result = await state.graph.invoke(identity.user_id, thread_id, message_id, connection=connection)
                 finally:
                     role_turn.reset(token)
+        except ProposalConflict as error:
+            return booking_conflict(request, error)
         except (GraphUnavailable, PostgresError):
             context = {"message_id": str(message_id)} if message_id is not None else {}
             return error_response(request, 503, "graph_unavailable", "Graph turn unavailable", **context)
-        finally:
-            active_threads.remove(thread_id)
         response = {"message_id": message_id, "status": result["status"]}
         if result["status"] == "rejected":
             response["reply"] = REFUSAL_MESSAGE
