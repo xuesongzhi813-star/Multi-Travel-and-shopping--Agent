@@ -108,3 +108,53 @@ class ToolExecutorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.status, "ok")
         self.assertIn(str(self.context.run_id), repr(logs.output))
         self.assertNotIn("PRIVATE", repr(logs.output))
+
+    async def test_invalid_correlation_id_never_reaches_tool(self):
+        async def unexpected(*args):
+            self.fail("invalid correlation ID reached the business tool")
+
+        executor = self.executor(unexpected)
+        for call_id in ("x" * 161, "DEMO-A1", "private text"):
+            with self.subTest(call_id=call_id):
+                result = await executor.execute(self.context, "airport", {"code": "ZRH"}, call_id)
+                self.assertEqual(result.status, "invalid_arguments")
+        self.assertEqual(self.sink.rows, [])
+
+    async def test_external_cancellation_audits_timeout(self):
+        started = asyncio.Event()
+
+        async def handle(*args):
+            started.set()
+            await asyncio.sleep(10)
+
+        task = asyncio.create_task(self.executor(handle, timeout=5).execute(
+            self.context, "airport", {"code": "ZRH"}, "cancelled",
+        ))
+        await started.wait()
+        task.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await task
+        self.assertEqual([(row.tool_call_id, row.status) for row in self.sink.rows], [("cancelled", "timeout")])
+
+    async def test_cancellation_during_audit_warns(self):
+        started = asyncio.Event()
+
+        class SlowSink:
+            async def write(self, record):
+                started.set()
+                await asyncio.sleep(10)
+
+        self.sink = SlowSink()
+
+        async def handle(*args):
+            return {"city": "Zürich"}
+
+        with self.assertLogs("customer_support_chat.app.tooling.executor", "WARNING") as logs:
+            task = asyncio.create_task(self.executor(handle, audit_timeout=5).execute(
+                self.context, "airport", {"code": "ZRH"}, "cancelled",
+            ))
+            await started.wait()
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertIn("category=cancelled", repr(logs.output))

@@ -19,7 +19,9 @@ from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from openai import APIError, APITimeoutError
 from pydantic import Field, ValidationError
-from customer_support_chat.app.tooling.executor import AuditSink, ToolContext, ToolExecutor, ToolRegistry
+from customer_support_chat.app.tooling.executor import (
+    AuditSink, ToolContext, ToolExecutor, ToolRegistry, valid_tool_call_id,
+)
 from .executor import FLIGHT_REFERENCE, FlightLookup, FlightToolData, LookupArguments, register_flight_tool
 
 
@@ -100,12 +102,18 @@ async def run_flight_role(
     @after_model
     async def validate_model_response(state, runtime):
         message = next((item for item in reversed(state["messages"]) if isinstance(item, AIMessage)), None)
-        if message is None or message.invalid_tool_calls or len(message.tool_calls) != 1:
+        if message is None:
+            raise FlightProtocolError("Expected one valid tool call")
+        if message.invalid_tool_calls or len(message.tool_calls) != 1:
+            for proposal in [*message.tool_calls, *message.invalid_tool_calls]:
+                name = proposal.get("name") or ""
+                if name != "HandoffCandidate":
+                    await executor.reject_envelope(context, name, proposal.get("id") or "")
             raise FlightProtocolError("Expected one valid tool call")
         call = message.tool_calls[0]
         call_id = call.get("id")
-        if not call_id:
-            raise FlightProtocolError("Missing model tool call identifier")
+        if not valid_tool_call_id(call_id):
+            raise FlightProtocolError("Invalid model tool call identifier")
         if call["name"] == "HandoffCandidate":
             LookupArguments.model_validate(call["args"])
             return None

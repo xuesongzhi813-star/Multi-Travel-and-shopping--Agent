@@ -87,3 +87,35 @@ class UnifiedIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(rows["flight"]["arguments"], {})
             self.assertEqual(rows["airport"]["arguments"], {"code": "ZRH"})
             self.assertEqual(rows["denied"]["arguments"], {})
+
+    async def test_grouped_and_malformed_business_calls_are_audited(self):
+        from langchain_core.messages import AIMessage
+
+        class Sink:
+            def __init__(self):
+                self.rows = []
+
+            async def write(self, row):
+                self.rows.append(row)
+
+        async def never_lookup(*args):
+            self.fail("unsafe response invoked business lookup")
+
+        sink = Sink()
+        grouped = AIMessage(content="", tool_calls=[
+            {"name": "unapproved", "id": "u1", "args": {}},
+            {"name": "lookup_flight", "id": "f1", "args": {"reference": "DEMO-A1"}},
+        ])
+        malformed = AIMessage(content="", invalid_tool_calls=[
+            {"name": "lookup_flight", "id": "m1", "args": "not JSON", "error": "private"},
+        ])
+        for message in (grouped, malformed):
+            result = await run_flight_role(
+                SYNTHETIC_INPUT, model=ScriptedFlightModel(replies=[message]),
+                lookup=never_lookup, audit_sink=sink,
+            )
+            self.assertEqual((result.status, result.reason), ("unavailable", "protocol_error"))
+        self.assertEqual({row.tool_call_id: row.status for row in sink.rows}, {
+            "u1": "permission_denied", "f1": "invalid_arguments", "m1": "invalid_arguments",
+        })
+        self.assertNotIn("not JSON", repr(sink.rows))
