@@ -1,7 +1,27 @@
-# 多智能体RAG客服系统
+# 旅行客服
 
+当前正式应用支持本地账号登录、会话恢复、航班查询和机场 MCP。航班与机场来源是明确标注的演示数据，默认直接查 PostgreSQL 并使用本机 MCP。可选 DeepSeek 模式见环境手册。
 
-> 本地开发使用 main。已交付功能的统一启动、浏览器验证和运维流程见[本地运行手册](docs/local-runbook.md)。
+Windows PowerShell 快速启动。先启动 Docker Desktop，首次运行按 [环境安装手册](docs/LOCAL_SETUP.md) 配置 `.env`。
+
+```powershell
+Set-Location -LiteralPath 'E:\multi-agent\Multi-Travel-and-shopping--Agent'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-local.ps1
+```
+
+打开 [旅行客服首页](http://127.0.0.1:8000/)，用 `demo-a` 和 `.env` 设置的演示密码登录。运行状态见 [健康检查](http://127.0.0.1:8000/health/ready)，接口见 [API 文档](http://127.0.0.1:8000/docs)。
+
+- [环境安装](docs/LOCAL_SETUP.md)
+- [完整运行手册](docs/RUNBOOK.md)
+- [故障排查](docs/TROUBLESHOOTING.md)
+- [架构和功能现状](docs/ARCHITECTURE.md)
+- [持续开发规范](docs/DEVELOPMENT.md)
+- [真实验证记录](docs/VERIFICATION.md)
+
+<details>
+<summary>来源项目和历史功能说明</summary>
+
+以下是旧版说明，涉及独立环境与历史入口。当前操作以上面的手册为准。
 
 ## 项目简介
 
@@ -227,3 +247,5 @@ Customer Support Chat 服务依赖于 Vectorizer 生成的向量数据库。
 
 感谢：
 https://linux.do
+
+</details>

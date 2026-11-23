@@ -44,7 +44,7 @@ Push-Location -LiteralPath $PSScriptRoot
 try {
     $env:P2_ENV_FILE = Join-Path $PSScriptRoot '.env'
     if (-not (Test-Path -LiteralPath $env:P2_ENV_FILE -PathType Leaf)) {
-        throw 'Create .env from .env.example and fill in the local passwords. See docs/local-runbook.md.'
+        throw 'Create .env from .env.example and fill in the local passwords. See docs/LOCAL_SETUP.md.'
     }
 
     $compose = @('compose', '--env-file', $env:P2_ENV_FILE, '-f', 'compose.local.yml')
@@ -52,8 +52,8 @@ try {
         'Status' {
             Invoke-Checked docker ($compose + @('ps', '-a'))
             try {
-                $status = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/" -UseBasicParsing -TimeoutSec 3
-                Write-Host "Web: HTTP $($status.StatusCode) on port $Port"
+                $status = Invoke-WebRequest -Uri "http://127.0.0.1:$Port/health/ready" -UseBasicParsing -TimeoutSec 3
+                Write-Host "Web: HTTP $($status.StatusCode) on port $Port. $($status.Content)"
             } catch {
                 Write-Host "Web: unavailable on port $Port"
             }
@@ -67,9 +67,19 @@ try {
 
     Install-LocalEnvironment $PSScriptRoot @('--with', 'business,local-runtime')
     Install-LocalEnvironment (Join-Path $PSScriptRoot 'flight_role_validation') @()
-    Invoke-Checked docker ($compose + @('up', '-d', '--wait', '--wait-timeout', '90'))
-
     $python = Join-Path $PSScriptRoot '.venv\Scripts\python.exe'
+    if ($Action -eq 'Start') {
+        Invoke-Checked $python @(
+            '-B', '-c', 'from web_app.app.local_tools import FlightSettings; FlightSettings.read()'
+        )
+    }
+    Invoke-Checked docker ($compose + @('up', '-d', '--wait', '--wait-timeout', '90', 'postgres'))
+    try {
+        Invoke-Checked docker ($compose + @('up', '-d', '--wait', '--wait-timeout', '20', 'qdrant', 'redis'))
+    } catch {
+        Write-Warning 'Optional storage startup failed. See /health/ready and Docker logs.'
+    }
+
     Invoke-Checked $python @('-B', 'scripts/prepare_business_db.py', 'migrate')
     Invoke-Checked $python @('-B', 'scripts/prepare_business_db.py', 'seed')
     Invoke-Checked $python @('-B', 'scripts/prepare_graph_db.py')
@@ -79,7 +89,8 @@ try {
         Invoke-Checked $python @(
             '-B', '-m', 'uvicorn', 'web_app.app.runtime:app',
             '--host', '127.0.0.1', '--port', "$Port", '--reload',
-            '--reload-dir', 'customer_support_chat', '--reload-dir', 'web_app'
+            '--reload-dir', 'customer_support_chat', '--reload-dir', 'web_app',
+            '--no-access-log', '--log-config', 'scripts/local-logging.json'
         )
     }
 } finally {

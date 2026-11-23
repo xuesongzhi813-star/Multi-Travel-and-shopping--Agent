@@ -17,6 +17,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from psycopg import Error as PostgresError
 from pydantic import BaseModel, ConfigDict, StringConstraints
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from customer_support_chat.app.business.auth import hash_password, verify_password
 from customer_support_chat.app.business.database import DatabaseSettings, create_engine, read_settings
@@ -26,7 +27,8 @@ from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
 from customer_support_chat.app.workflow.thread_lock import try_thread_lock
 
 
-from .local_tools import run_local_tool
+from .local_tools import FlightSettings, LocalToolError, LocalToolTimeout, ROLE_PYTHON, run_local_tool
+from .operations import error_response, http_error, observe_request, postgres_schema_ready, qdrant_ready, redis_ready
 
 
 COOKIE_NAME = "travel_session"
@@ -97,6 +99,7 @@ def create_app(
     async def lifespan(app: FastAPI):
         config = settings or read_settings()
         schema = checkpoint_schema if checkpoint_schema is not None else read_checkpoint_schema(config.schema)
+        flight_settings = FlightSettings.read()
         engine = create_engine(config)
         try:
             repository = BusinessRepository(engine, config.schema)
@@ -105,6 +108,9 @@ def create_app(
             app.state.checkpoint_schema = schema
             app.state.active_threads = set()
             app.state.tool_slots = asyncio.Semaphore(2)
+            app.state.flight = flight_settings
+            app.state.live_active = False
+            app.state.engine = engine
             app.state.dummy_password_hash = await asyncio.to_thread(hash_password, token_urlsafe(32))
             async with open_graph_runtime(config, schema, repository.read_owned_message) as graph:
                 app.state.graph = graph
@@ -114,30 +120,78 @@ def create_app(
 
     app = FastAPI(title="Local travel business API", lifespan=lifespan)
 
-    @app.middleware("http")
-    async def disable_api_caching(request: Request, call_next):
-        response = await call_next(request)
-        if request.url.path.startswith("/api/"):
-            response.headers["Cache-Control"] = "no-store"
-        return response
+    app.middleware("http")(observe_request)
+    app.add_exception_handler(StarletteHTTPException, http_error)
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError):
-        return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+        return error_response(request, 422, "invalid_request", "Invalid request")
+
+    @app.get("/health/live")
+    async def liveness():
+        return {"status": "ok"}
+
+    @app.get("/health/ready")
+    async def readiness(request: Request):
+        state = request.app.state
+        business, checkpoints, redis, qdrant = await asyncio.gather(
+            postgres_schema_ready(state.engine, f"{state.database_settings.schema}.tool_audit_logs"),
+            postgres_schema_ready(state.engine, f"{state.checkpoint_schema}.checkpoints"),
+            redis_ready(), qdrant_ready(),
+        )
+        worker = ROLE_PYTHON.is_file()
+        required_ready = business and checkpoints and worker
+        status = "unavailable" if not required_ready else "ok" if redis and qdrant else "degraded"
+        return JSONResponse(status_code=200 if required_ready else 503, content={
+            "status": status,
+            "dependencies": {
+                "business_database": business, "graph_checkpoints": checkpoints, "role_worker": worker,
+                "redis": redis, "qdrant": qdrant,
+            },
+            "flight_mode": state.flight.mode,
+            "model_connectivity": "not_probed",
+        })
 
     @app.get("/", response_class=FileResponse, include_in_schema=False)
     async def home():
         return FileResponse(Path(__file__).with_name("templates") / "local.html", media_type="text/html")
 
     async def local_tool(request: Request, identity: Principal, operation: str, value: str):
-        slots = request.app.state.tool_slots
-        if slots.locked():
-            raise HTTPException(503, "本地工具繁忙")
+        state = request.app.state
+        slots = state.tool_slots
+        mode = state.flight.mode if operation == "flight" else "direct"
+        live = mode == "deepseek"
+        if live and state.flight.remaining_runs <= 0:
+            return error_response(request, 429, "model_budget_exhausted", "本次启动的模型额度已用完")
+        if slots.locked() or (live and state.live_active):
+            return error_response(request, 503, "tool_busy", "本地工具繁忙")
+
+        if live:
+            state.live_active = True
+            state.flight.remaining_runs -= 1
         try:
             async with slots:
-                return await run_local_tool(operation, identity.user_id, value, request.app.state.database_settings)
-        except RuntimeError:
-            raise HTTPException(503, "本地工具暂不可用") from None
+                result = await run_local_tool(
+                    operation, identity.user_id, value, state.database_settings, request.state.request_id,
+                    flight_mode=mode, api_key=state.flight.api_key if live else "",
+                )
+        except LocalToolTimeout:
+            return error_response(request, 504, "worker_timeout", "本地工具超时")
+        except LocalToolError:
+            return error_response(request, 503, "worker_unavailable", "本地工具暂不可用")
+        finally:
+            if live:
+                state.live_active = False
+        if live and result["provider_requests"] == 0:
+            state.flight.remaining_runs += 1
+
+        reason = result.get("reason") or result.get("error_kind")
+        if reason == "provider_rate_limit":
+            return error_response(request, 429, reason, "模型服务限流，稍后再试")
+        if result["status"] in {"timeout", "tool_error", "unavailable"}:
+            code = 504 if (result["status"] == "timeout" or reason == "timeout") else 503
+            return error_response(request, code, reason or "tool_unavailable", "查询暂不可用")
+        return result
 
     @app.post("/api/tools/flight")
     async def flight_tool(body: FlightRequest, request: Request, identity: Identity):
@@ -188,8 +242,9 @@ def create_app(
         if thread is None:
             raise HTTPException(404, "Thread not found")
         if graph_unavailable:
+            request.state.error_type = "graph_unavailable"
             return JSONResponse(
-                status_code=503, content=jsonable_encoder(thread | {"detail": "Graph state unavailable"}),
+                status_code=503, content=jsonable_encoder(thread | {"detail": "Graph state unavailable", "code": "graph_unavailable", "request_id": str(request.state.request_id)}),
             )
         return thread | {"graph": graph}
 
@@ -216,10 +271,8 @@ def create_app(
                     raise HTTPException(404, "Thread not found")
                 result = await state.graph.invoke(identity.user_id, thread_id, message_id, connection=connection)
         except (GraphUnavailable, PostgresError):
-            failure = {"detail": "Graph turn unavailable"}
-            if message_id is not None:
-                failure["message_id"] = str(message_id)
-            return JSONResponse(status_code=503, content=failure)
+            context = {"message_id": str(message_id)} if message_id is not None else {}
+            return error_response(request, 503, "graph_unavailable", "Graph turn unavailable", **context)
         finally:
             active_threads.remove(thread_id)
         response = {"message_id": message_id, "status": result["status"]}

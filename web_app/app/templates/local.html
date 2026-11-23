@@ -38,8 +38,8 @@ small { color: #486156; }
 <form id="session"><button id="new-thread" type="button">新建会话</button><input id="thread" aria-label="会话 ID" placeholder="会话 ID"><button>打开会话</button></form>
 <small id="graph"></small><ul id="messages"></ul>
 <form id="send"><input name="content" aria-label="消息" placeholder="输入消息" required maxlength="4000"><button>发送</button></form></section>
-<div class="grid"><article><h2>本人航班</h2><p><small>本地脚本模型 · 合成行程</small></p><form id="flight"><select id="flights" aria-label="航班"><option value="">选择航班</option></select><button>查航班</button></form><pre id="flight-result"></pre></article>
-<article><h2>机场城市</h2><form id="airport"><input name="code" aria-label="机场代码" value="ZRH" maxlength="3" required><button>查城市</button></form><pre id="airport-result"></pre></article></div>
+<div class="grid"><article><h2>本人航班</h2><p><small>合成行程 · 结果标明模型模式与机场数据来源</small></p><form id="flight"><select id="flights" aria-label="航班"><option value="">选择航班</option></select><button>查航班</button></form><pre id="flight-result"></pre></article>
+<article><h2>机场城市</h2><p><small>本地 MCP 示例目录</small></p><form id="airport"><input name="code" aria-label="机场代码" value="ZRH" maxlength="3" required><button>查城市</button></form><pre id="airport-result"></pre></article></div>
 </div>
 </main>
 <script>
@@ -48,7 +48,10 @@ async function api(path, body) {
   const options = body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
   const response = await fetch(path, options);
   const data = response.status === 204 ? null : await response.json();
-  if (!response.ok) throw new Error(data?.detail || String(response.status));
+  if (!response.ok) {
+    const detail = data?.detail || String(response.status);
+    throw new Error(data?.request_id ? detail + ' · 请求 ID ' + data.request_id : detail);
+  }
   return data;
 }
 function panel(loggedIn) { $('app-panel').hidden = !loggedIn; $('login-panel').hidden = loggedIn; }

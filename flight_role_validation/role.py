@@ -17,7 +17,7 @@ from langchain.agents.structured_output import StructuredOutputError, ToolStrate
 from langchain.tools import ToolRuntime, tool
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
-from openai import APIError, APITimeoutError
+from openai import APIError, APITimeoutError, RateLimitError
 from pydantic import Field, ValidationError
 from customer_support_chat.app.tooling.executor import (
     AuditSink, ToolContext, ToolExecutor, ToolRegistry, valid_tool_call_id,
@@ -167,6 +167,8 @@ async def run_flight_role(
         return FlightRoleResult("unavailable", reason="budget_exhausted")
     except (FlightProtocolError, StructuredOutputError, ValidationError):
         return FlightRoleResult("unavailable", reason="protocol_error")
+    except RateLimitError:
+        return FlightRoleResult("unavailable", reason="provider_rate_limit")
     except APIError:
         return FlightRoleResult("unavailable", reason="provider_error")
     except FlightDataUnavailable:
@@ -177,7 +179,10 @@ async def run_flight_role(
     if not isinstance(candidate, HandoffCandidate) or candidate.reference != target or verified is None:
         return FlightRoleResult("unavailable", reason="unverified_evidence")
 
-    facts, tool_call_id = verified
+    return handoff_from_facts(*verified)
+
+
+def handoff_from_facts(facts: FlightToolData, tool_call_id: str) -> FlightRoleResult:
     if facts.arrival_at_utc.utcoffset() is None:
         return FlightRoleResult("unavailable", reason="unverified_evidence")
     try:
@@ -186,5 +191,5 @@ async def run_flight_role(
         return FlightRoleResult("unavailable", reason="unverified_evidence")
 
     return FlightRoleResult("verified", handoff=FlightHandoff(
-        target, facts.arrival_airport, arrival_date, facts.arrival_timezone, tool_call_id,
+        facts.reference, facts.arrival_airport, arrival_date, facts.arrival_timezone, tool_call_id,
     ))

@@ -28,7 +28,7 @@ class DatabaseSettings:
 
 def local_value(name: str, default: str = "") -> str:
     env_file = Path(os.environ.get("P2_ENV_FILE", ROOT / ".env"))
-    return os.environ.get(name, dotenv_values(env_file, interpolate=False).get(name) or default)
+    return os.environ.get(name, dotenv_values(env_file, interpolate=False, encoding="utf-8-sig").get(name) or default)
 
 
 def validate_schema(schema: str) -> None:
