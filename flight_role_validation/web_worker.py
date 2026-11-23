@@ -7,11 +7,16 @@ import os
 import sys
 from uuid import UUID
 
+from langchain_core.messages import AIMessage
+
 from customer_support_chat.app.business.database import create_engine, read_settings
 from customer_support_chat.app.business.repository import BusinessRepository
 from customer_support_chat.app.tooling.audit import PostgresAuditSink
 from customer_support_chat.app.tooling.executor import ToolContext, ToolExecutor, ToolRegistry, ToolResult
 
+from customer_support_chat.app.workflow.hotel_handoff import HotelQuery
+
+from .hotel import HOTEL_TOOL, run_hotel_role
 from .executor import FlightToolData, build_repository_lookup, register_flight_tool
 from .mcp_tools import AIRPORT_TOOL, MCP_ROLE, open_airport_session, register_airport_tools
 from .role import FlightRoleInput, handoff_from_facts, run_flight_role
@@ -65,7 +70,7 @@ async def flight(context: ToolContext, audit: PostgresAuditSink, repository: Bus
 
     report = {**asdict(result), "mode": mode, "provider_requests": provider_requests}
     if result.handoff is not None:
-        airport_context = ToolContext(context.user_id, MCP_ROLE, context.run_id)
+        airport_context = ToolContext(context.user_id, MCP_ROLE, context.run_id, context.thread_id)
         report["airport"] = asdict(await airport(airport_context, audit, result.handoff.arrival_airport))
     return report
 
@@ -76,14 +81,34 @@ def restrict_lookup(lookup, reference):
     return selected
 
 
-async def run(operation: str, user_id: UUID, value: str, request_id: UUID, mode: str) -> dict:
+async def run(
+    operation: str, user_id: UUID, value: str | dict, request_id: UUID, mode: str,
+    *, thread_id: UUID | None = None, budget_seconds: float = 12,
+) -> dict:
     settings = read_settings()
     engine = create_engine(settings)
     try:
         audit = PostgresAuditSink(engine, settings.schema)
+        if operation == "hotel":
+            from .fixture_model import ScriptedFlightModel, tool_reply
+
+            if not isinstance(value, dict) or thread_id is None:
+                raise ValueError("Hotel queries require a host-provided thread and stay")
+            model = ScriptedFlightModel(replies=[
+                tool_reply(HOTEL_TOOL, "hotel-inventory"), AIMessage(content="库存已核验"),
+            ])
+            result = await run_hotel_role(
+                HotelQuery.from_json(value), model=model, repository=BusinessRepository(engine, settings.schema),
+                context=ToolContext(user_id, "hotel", request_id, thread_id), audit_sink=audit,
+                deadline=asyncio.get_running_loop().time() + budget_seconds,
+            )
+            return {
+                "status": result.status, "options": [option.to_json() for option in result.options],
+                "mode": "offline", "provider_requests": 0,
+            }
         if operation == "flight":
             return await flight(
-                ToolContext(user_id, "flight", request_id), audit, BusinessRepository(engine, settings.schema), value, mode,
+                ToolContext(user_id, "flight", request_id, thread_id), audit, BusinessRepository(engine, settings.schema), value, mode,
             )
         return asdict(await airport(ToolContext(user_id, MCP_ROLE, request_id), audit, value))
     finally:
@@ -94,11 +119,13 @@ def main() -> int:
     try:
         payload = json.load(sys.stdin)
         operation, mode = payload["operation"], payload["flight_mode"]
-        if operation not in {"flight", "airport"} or mode not in {"direct", "offline", "deepseek"}:
+        if operation not in {"flight", "airport", "hotel"} or mode not in {"direct", "offline", "deepseek"}:
             return 1
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             result = runner.run(run(
                 operation, UUID(payload["user_id"]), payload["value"], UUID(payload["request_id"]), mode,
+                thread_id=UUID(payload["thread_id"]) if payload.get("thread_id") else None,
+                budget_seconds=payload.get("budget_seconds", 12),
             ))
     except Exception:
         return 1
