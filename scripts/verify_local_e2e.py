@@ -14,7 +14,7 @@ import time
 from uuid import UUID, uuid4
 
 from httpx import Client, RequestError
-from sqlalchemy import select
+from sqlalchemy import func, select, update
 from sqlalchemy.schema import DropSchema
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -125,6 +125,71 @@ async def read_audit(run_id):
         await engine.dispose()
 
 
+async def booking_fixture(delta=0):
+    settings = read_settings()
+    engine = create_engine(settings)
+    db = tables(settings.schema)
+    stock = db.hotel_inventory
+    where = stock.c.hotel_id == "demo-airport"
+    try:
+        async with engine.begin() as connection:
+            if delta:
+                await connection.execute(update(stock).where(where).values(price_minor=stock.c.price_minor + delta))
+            quantity = await connection.scalar(select(stock.c.quantity).where(where))
+            bookings = await connection.scalar(select(func.count()).select_from(db.hotel_bookings))
+            receipts = await connection.scalar(select(func.count()).select_from(db.hotel_booking_receipts))
+            return quantity, bookings, receipts
+    finally:
+        await engine.dispose()
+
+
+def verify_booking(client, path, last_recommendation, password_b):
+    def sample(delta=0):
+        return asyncio.run(booking_fixture(delta), loop_factory=asyncio.SelectorEventLoop)
+
+    def propose(recommendation):
+        response = require(client.post(path + "/hotel-proposals", json={
+            "message_id": recommendation["message_id"], "option_index": 0,
+        }), 201)
+        return response.json()
+
+    def choose(proposal, decision, requester=client, status=200):
+        return require(requester.post(
+            path + f"/approvals/{proposal['action_id']}/decision", json={"decision": decision},
+        ), status).json()
+
+    def recommend():
+        result = require(client.post(path + "/messages", json={
+            "content": "找 DEMO-A1 落地后的酒店，住 1 晚",
+        }), 201).json()
+        assert result["status"] == "hotel_results"
+        return result
+
+    before = sample()
+    initial = propose(last_recommendation)
+    assert initial["status"] == "awaiting_decision" and initial["total_minor"] == 18000
+    assert require(client.get(path), 200).json()["booking"]["action_id"] == initial["action_id"]
+    require(client.post(path + "/messages", json={"content": "继续"}), 409)
+    with Client(base_url=client.base_url, timeout=20, trust_env=False) as other:
+        login(other, "demo-b", password_b)
+        choose(initial, "approve", requester=other, status=404)
+    assert choose(initial, "reject")["status"] == "rejected"
+    assert sample() == before
+
+    outdated = propose(recommend())
+    sample(100)
+    assert choose(outdated, "approve")["status"] == "stale"
+    assert sample(-100) == before
+
+    selected = propose(recommend())
+    booked = choose(selected, "approve")
+    assert booked["status"] == "booked" and booked["booking_id"]
+    assert choose(selected, "approve")["booking_id"] == booked["booking_id"]
+    assert require(client.get(path), 200).json()["booking"]["booking_id"] == booked["booking_id"]
+    assert sample() == (before[0] - 1, before[1] + 1, before[2] + 1)
+    print("PASS P7 proposal, refusal, cross-account protection, stale quote, duplicate approval and stock/receipt", flush=True)
+
+
 async def remove_probe_schemas(tag):
     config = read_settings()
     engine = create_engine(config)
@@ -224,11 +289,13 @@ def run(live):
             assert require(client.get(hotel_path), 200).json()["graph"]["hotel_options"] == result["hotel_options"]
             audit = asyncio.run(read_audit(UUID(hotel.headers["X-Request-ID"])), loop_factory=asyncio.SelectorEventLoop)
             assert ("lookup_flight", "ok") in audit and ("search_hotel_inventory", "ok") in audit, audit
-            assert require(client.post(hotel_path + "/messages", json={
+            repeated = require(client.post(hotel_path + "/messages", json={
                 "content": "找 DEMO-A1 落地后的酒店，住 1 晚",
-            }), 201).json()["hotel_options"] == result["hotel_options"]
+            }), 201).json()
+            assert repeated["hotel_options"] == result["hotel_options"]
             print("PASS P6 hotel handoff after restart, local date, account isolation, audit and read-only repeat",
                   flush=True)
+            verify_booking(client, hotel_path, repeated, password_b)
         with server(free_port(), dict(env, REDIS_PORT=str(free_port())), launcher=False) as client:
             health = require(client.get("/health/ready"), 200).json()
             assert health["status"] == "degraded" and health["dependencies"]["redis"] is False

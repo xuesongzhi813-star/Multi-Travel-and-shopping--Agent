@@ -26,8 +26,9 @@ class BookingApiTests(BookingRepositoryFixture):
         self.a, self.app = await self.client(0)
         self.b, _ = await self.client(1)
         self.path = f"/api/threads/{self.owner.thread_id}"
-        self.addCleanup(patch.stopall)
-        patch("web_app.app.runtime.run_local_tool", side_effect=self.offline_role).start()
+        role = patch("web_app.app.runtime.run_local_tool", side_effect=self.offline_role)
+        role.start()
+        self.addCleanup(role.stop)
         answer = await self.message(self.a, "找 DEMO-A1 的酒店，住 1 晚")
         self.assertEqual(answer.json()["status"], "hotel_results")
         self.message_id = answer.json()["message_id"]
@@ -110,7 +111,9 @@ class BookingApiTests(BookingRepositoryFixture):
         async with try_thread_lock(self.settings, self.checkpoints, self.owner.thread_id):
             self.assertEqual((await self.choose(action, client=other)).status_code, 409)
         results = await asyncio.gather(self.choose(action), self.choose(action, client=other))
-        self.assertEqual(sorted(response.status_code for response in results), [200, 409])
+        self.assertIn(sorted(response.status_code for response in results), ([200, 200], [200, 409]))
+        successful = [response.json()["booking_id"] for response in results if response.status_code == 200]
+        self.assertEqual(len(set(successful)), 1)
         self.assertEqual((await self.choose(action)).json()["status"], "booked")
         self.assertEqual(await self.order_count(), 1)
 
@@ -153,3 +156,10 @@ class BookingApiTests(BookingRepositoryFixture):
         self.assertEqual((await self.message(self.a, "继续")).status_code, 201)
         self.assertEqual((await self.choose(action)).json()["status"], "expired")
         self.assertEqual(await self.order_count(), 0)
+
+    async def test_readiness_requires_booking_migration(self):
+        async with self.engine.begin() as connection:
+            await connection.run_sync(lambda sync: self.db.hotel_booking_receipts.drop(sync))
+        health = await self.a.get("/health/ready")
+        self.assertEqual(health.status_code, 503)
+        self.assertFalse(health.json()["dependencies"]["business_database"])

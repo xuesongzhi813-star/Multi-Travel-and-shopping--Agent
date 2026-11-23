@@ -241,8 +241,10 @@ def create_app(
     @app.get("/health/ready")
     async def readiness(request: Request):
         state = request.app.state
+        schema = state.database_settings.schema
+        business_relations = ("tool_audit_logs", "hotel_booking_proposals", "hotel_bookings", "hotel_booking_receipts")
         business, checkpoints, redis, qdrant = await asyncio.gather(
-            postgres_schema_ready(state.engine, f"{state.database_settings.schema}.tool_audit_logs"),
+            postgres_schema_ready(state.engine, *(f"{schema}.{name}" for name in business_relations)),
             postgres_schema_ready(state.engine, f"{state.checkpoint_schema}.checkpoints"),
             redis_ready(), qdrant_ready(),
         )

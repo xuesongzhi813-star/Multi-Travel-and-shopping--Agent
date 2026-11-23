@@ -54,7 +54,10 @@ class BookingRepository:
         if row is None:
             return None
         view = {field.name: row.get(field.name) for field in fields(ProposalView)}
-        if now is not None and row["status"] in {"awaiting_decision", "decided"} and row["expires_at"] <= now:
+        expirable = row["status"] == "awaiting_decision" or (
+            row["status"] == "decided" and row["decision"] == "approve"
+        )
+        if expirable and now is not None and row["expires_at"] <= now:
             view["status"] = "expired"
         return ProposalView(**view)
 
@@ -179,13 +182,12 @@ class BookingRepository:
                 return BookingResolution(self._view(row))
             if row["status"] == "booked":
                 raise ProposalConflict("missing_booking_receipt")
-            now = await self._now(connection)
-            if row["expires_at"] <= now:
+            if row["decision"] == "reject":
+                return await self._finish(connection, scope.action_id, "rejected")
+            if row["expires_at"] <= await self._now(connection):
                 return await self._finish(connection, scope.action_id, "expired")
             if row["decision"] is None:
                 raise ProposalConflict("decision_required")
-            if row["decision"] == "reject":
-                return await self._finish(connection, scope.action_id, "rejected")
 
             stock = await self._stock(
                 connection, row["hotel_id"], row["room_type"], row["check_in"], row["check_out"], lock=True,

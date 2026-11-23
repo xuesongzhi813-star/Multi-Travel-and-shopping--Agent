@@ -62,11 +62,11 @@ async def observe_request(request: Request, call_next):
     return response
 
 
-async def postgres_schema_ready(engine, relation: str) -> bool:
+async def postgres_schema_ready(engine, *relations: str) -> bool:
     try:
         async with asyncio.timeout(PROBE_TIMEOUT), engine.connect() as connection:
-            resolved = await connection.scalar(select(func.to_regclass(relation)))
-            return resolved is not None
+            resolved = (await connection.execute(select(*(func.to_regclass(name) for name in relations)))).one()
+            return all(relation is not None for relation in resolved)
     except (TimeoutError, DBAPIError, PoolTimeout):
         return False
 

@@ -164,3 +164,12 @@ class BookingTransactionTests(BookingRepositoryFixture):
             await connection.execute(inventory.delete().where(hotel, night))
         self.assertEqual((await self.booking.resolve_action(missing_scope)).proposal.status, "stale")
         self.assertEqual(await self.snapshot(), ([3], 0, 0))
+
+    async def test_rejection_recorded_before_expiry_survives_delayed_recovery(self):
+        proposal = await self.create()
+        scope = BookingScope(self.owner, proposal.action_id)
+        await self.booking.record_decision(scope, "reject")
+        await self.expire(scope)
+        self.assertEqual((await self.booking.get_proposal(scope)).status, "decided")
+        self.assertEqual((await self.booking.resolve_action(scope)).proposal.status, "rejected")
+        self.assertEqual(await self.snapshot(), ([3, 3], 0, 0))

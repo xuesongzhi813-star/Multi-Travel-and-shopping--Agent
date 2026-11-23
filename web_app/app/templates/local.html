@@ -36,7 +36,7 @@ small { color: #486156; }
 <div id="app-panel" hidden>
 <section><header><h2>会话</h2><button id="logout" type="button">退出</button></header>
 <form id="session"><button id="new-thread" type="button">新建会话</button><input id="thread" aria-label="会话 ID" placeholder="会话 ID"><button>打开会话</button></form>
-<small id="graph"></small><ul id="messages"></ul><p id="hotel-reply" aria-live="polite"></p><ul id="hotel-options"></ul>
+<small id="graph"></small><ul id="messages"></ul><p id="hotel-reply" aria-live="polite"></p><ul id="hotel-options"></ul><section id="booking" aria-live="polite" hidden></section>
 <form id="send"><input name="content" aria-label="消息" placeholder="输入消息" required maxlength="4000"><button>发送</button></form></section>
 <div class="grid"><article><h2>本人航班</h2><p><small>合成行程 · 结果标明模型模式与机场数据来源</small></p><form id="flight"><select id="flights" aria-label="航班"><option value="">选择航班</option></select><button>查航班</button></form><pre id="flight-result"></pre></article>
 <article><h2>机场城市</h2><p><small>本地 MCP 示例目录</small></p><form id="airport"><input name="code" aria-label="机场代码" value="ZRH" maxlength="3" required><button>查城市</button></form><pre id="airport-result"></pre></article></div>
@@ -44,6 +44,16 @@ small { color: #486156; }
 </main>
 <script>
 const $ = id => document.getElementById(id);
+let viewGeneration = 0;
+let authGeneration = 0;
+function clearThreadView() {
+  ++viewGeneration;
+  renderHotel(null);
+  renderBooking(null);
+  $('messages').replaceChildren();
+  $('graph').textContent = '';
+}
+$('thread').addEventListener('input', clearThreadView);
 async function api(path, body) {
   const options = body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
   const response = await fetch(path, options);
@@ -71,41 +81,134 @@ async function loadFlights() {
   for (const row of rows) $('flights').add(new Option(row.reference+' · '+row.origin+' → '+row.destination,row.reference));
 }
 function threadPath() { return '/api/threads/'+encodeURIComponent($('thread').value.trim()); }
-function renderHotel(result) {
+function bookingButton(label, handler) {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = label;
+  button.dataset.bookingControl = '';
+  button.addEventListener('click', handler);
+  return button;
+}
+const bookingRequests = new Set();
+async function postBooking(path, endpoint, payload) {
+  if (path !== threadPath() || bookingRequests.has(path)) return;
+  const generation = viewGeneration, auth = authGeneration;
+  bookingRequests.add(path);
+  const buttons = [...document.querySelectorAll('[data-booking-control]')];
+  buttons.forEach(button => { button.disabled = true; });
+  $('status').textContent = '';
+  let failure;
+  try { await api(path + endpoint, payload); }
+  catch (error) { failure = error; }
+  finally {
+    bookingRequests.delete(path);
+    buttons.forEach(button => { button.disabled = false; });
+  }
+  if (path !== threadPath() || generation !== viewGeneration || auth !== authGeneration) return;
+  try { await loadThread(); }
+  catch (error) { failure ||= error; }
+  if (failure && path === threadPath() && auth === authGeneration) $('status').textContent = failure.message;
+}
+function stayText(option) {
+  const price = (option.total_minor / 100).toFixed(2) + ' ' + option.currency;
+  return option.hotel_name + ' · ' + option.room_type + ' · ' +
+    option.check_in + ' 至 ' + option.check_out + ' · 演示总价 ' + price;
+}
+function renderHotel(result, booking, path) {
   $('hotel-reply').textContent = result?.reply || '';
   $('hotel-options').replaceChildren();
-  for (const option of result?.hotel_options || []) {
+  const busy = booking?.resume_required || ['awaiting_decision', 'decided'].includes(booking?.status);
+  for (const [option_index, option] of (result?.hotel_options || []).entries()) {
     const item = document.createElement('li');
-    const price = (option.total_minor / 100).toFixed(2) + ' ' + option.currency;
-    item.textContent = option.hotel_name + ' · ' + option.room_type + ' · ' +
-      option.check_in + ' 至 ' + option.check_out + ' · 演示总价 ' + price;
+    item.textContent = stayText(option);
+    if (!busy && booking?.message_id !== result.message_id) {
+      item.append(' ', bookingButton('发起演示预订', () => postBooking(path, '/hotel-proposals', {
+        message_id: result.message_id, option_index,
+      })));
+    }
     $('hotel-options').append(item);
   }
 }
+function renderBooking(booking, path) {
+  const panel = $('booking');
+  panel.replaceChildren();
+  panel.hidden = !booking;
+  if (!booking) return;
+  const labels = {
+    awaiting_decision:'等待确认', decided:'正在处理', booked:'演示预订成功',
+    rejected:'已拒绝', expired:'提案已过期，请重新查询酒店',
+    stale:'演示库存或价格已变化，请重新查询酒店',
+  };
+  const heading = document.createElement('h3');
+  heading.textContent = '演示预订 · ' + labels[booking.status];
+  const details = document.createElement('p');
+  details.textContent = stayText(booking);
+  const expiry = document.createElement('p');
+  expiry.textContent = '提案有效期至 ' + new Date(booking.expires_at).toLocaleString('zh-CN');
+  panel.append(heading, details, expiry);
+  const decide = decision => postBooking(path, '/approvals/' + booking.action_id + '/decision', {decision});
+  if (booking.resume_required && booking.decision) {
+    panel.append(bookingButton('继续处理', () => decide(booking.decision)));
+  } else if (booking.status === 'awaiting_decision') {
+    panel.append(bookingButton('确认预订', () => decide('approve')),
+      ' ', bookingButton('拒绝', () => decide('reject')));
+  } else if (booking.booking_id) {
+    const receipt = document.createElement('p');
+    receipt.id = 'booking-receipt';
+    receipt.textContent = '演示订单号 ' + booking.booking_id;
+    panel.append(receipt);
+  }
+}
 async function loadThread() {
-  const state = await api(threadPath());
+  const path = threadPath(), generation = ++viewGeneration;
+  let state;
+  try { state = await api(path); }
+  catch (error) {
+    if (generation === viewGeneration && path === threadPath()) {
+      clearThreadView();
+      throw error;
+    }
+    return;
+  }
+  if (generation !== viewGeneration || path !== threadPath()) return;
+  renderHotel(state.graph, state.booking, path);
+  renderBooking(state.booking, path);
   $('messages').replaceChildren();
   for (const message of state.messages) { const item=document.createElement('li'); item.textContent=message.content; $('messages').append(item); }
   $('graph').textContent = state.graph ? '已完成第 '+state.graph.turn_count+' 轮 · '+state.graph.status : '会话尚无处理结果';
 }
 form('login',async data => {
-  await api('/api/auth/login',Object.fromEntries(data)); $('login').reset(); panel(true); await loadFlights();
+  const auth = ++authGeneration;
+  clearThreadView();
+  await api('/api/auth/login',Object.fromEntries(data));
+  if (auth !== authGeneration) return;
+  $('login').reset(); panel(true); await loadFlights();
 });
 $('logout').addEventListener('click',async () => {
-  try { await api('/api/auth/logout',{}); } finally {
-    renderHotel(null);
-    panel(false); $('thread').value=''; $('messages').replaceChildren();
-    for (const key of ['graph','flight-result','airport-result']) $(key).textContent='';
-  }
+  ++authGeneration;
+  clearThreadView();
+  panel(false);
+  $('thread').value = '';
+  for (const key of ['flight-result','airport-result']) $(key).textContent = '';
+  try { await api('/api/auth/logout',{}); }
+  catch (error) { $('status').textContent = error.message; }
 });
 $('new-thread').addEventListener('click',async () => {
-  try { const t = await api('/api/threads',{}); $('thread').value=t.thread_id; await loadThread(); }
-  catch(err){ $('status').textContent=err.message; }
+  const generation = viewGeneration;
+  try {
+    const thread = await api('/api/threads',{});
+    if (generation !== viewGeneration) return;
+    clearThreadView();
+    $('thread').value = thread.thread_id;
+    await loadThread();
+  } catch(err){ $('status').textContent=err.message; }
 });
 form('session',loadThread);
 form('send',async data => {
   if (!$('thread').value) throw new Error('请先新建或打开会话');
-  const result=await api(threadPath()+'/messages',{content:data.get('content')});
+  const path = threadPath(), generation = viewGeneration;
+  const result = await api(path+'/messages',{content:data.get('content')});
+  if (generation !== viewGeneration || path !== threadPath()) return;
   await loadThread(); $('send').reset();
   $('status').textContent=result.reply || '已保存消息';
 });
@@ -116,6 +219,11 @@ form('flight',async () => {
 form('airport',async data => {
   $('airport-result').textContent=JSON.stringify(await api('/api/tools/airport',{code:data.get('code').toUpperCase()}),null,2);
 });
-loadFlights().then(()=>panel(true)).catch(()=>panel(false));
+const initialAuth = authGeneration;
+loadFlights().then(() => {
+  if (initialAuth === authGeneration) panel(true);
+}).catch(() => {
+  if (initialAuth === authGeneration) panel(false);
+});
 </script>
 </html>

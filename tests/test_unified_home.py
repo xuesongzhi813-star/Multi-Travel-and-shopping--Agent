@@ -39,3 +39,8 @@ class UnifiedHomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.json(), {
             "detail": "Invalid request", "code": "invalid_request", "request_id": correlation,
         })
+
+    async def test_home_exposes_two_step_demo_booking_controls(self):
+        result = await self.client.get("/")
+        for fragment in ("hotel-proposals", "/approvals/", "发起演示预订", "确认预订", "拒绝", "继续处理", 'id="booking"'):
+            self.assertIn(fragment, result.text, fragment)
