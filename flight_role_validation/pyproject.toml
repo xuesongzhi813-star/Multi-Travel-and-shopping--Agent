@@ -10,6 +10,7 @@ langchain-deepseek = "1.2.1"
 langchain-openai = "1.8.2"
 openai = "2.45.0"
 httpx = "0.28.1"
+mcp = "1.30.0"
 sqlalchemy = "2.0.43"
 psycopg = { version = "3.3.9", extras = ["binary"] }
 alembic = "1.20.1"
