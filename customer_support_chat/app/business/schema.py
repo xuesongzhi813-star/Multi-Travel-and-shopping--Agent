@@ -7,6 +7,8 @@ from sqlalchemy import (
     String, Table, Text, Uuid, func,
 )
 
+from sqlalchemy.dialects.postgresql import JSONB
+
 from .database import validate_schema
 
 
@@ -19,6 +21,7 @@ class BusinessTables:
     flight_itineraries: Table
     hotels: Table
     hotel_inventory: Table
+    tool_audit_logs: Table
 
 
 def tables(schema: str) -> BusinessTables:
@@ -82,4 +85,20 @@ def tables(schema: str) -> BusinessTables:
         CheckConstraint("quantity >= 0", name="inventory_quantity_nonnegative"),
         CheckConstraint("price_minor >= 0", name="inventory_price_nonnegative"),
     )
-    return BusinessTables(users, auth_sessions, threads, messages, itineraries, hotels, inventory)
+    audit = Table(
+        "tool_audit_logs", metadata,
+        Column("run_id", Uuid, primary_key=True),
+        Column("tool_call_id", String(160), primary_key=True),
+        Column("thread_id", Uuid),
+        Column("action_id", Uuid),
+        Column("tool_name", String(80), nullable=False),
+        Column("source", String(80), nullable=False),
+        Column("status", String(32), nullable=False),
+        Column("error_kind", String(40)),
+        Column("arguments", JSONB, nullable=False),
+        Column("result_summary", JSONB, nullable=False),
+        Column("retry_count", Integer, nullable=False),
+        Column("elapsed_ms", Integer, nullable=False),
+        Column("created_at", DateTime(timezone=True), nullable=False),
+    )
+    return BusinessTables(users, auth_sessions, threads, messages, itineraries, hotels, inventory, audit)

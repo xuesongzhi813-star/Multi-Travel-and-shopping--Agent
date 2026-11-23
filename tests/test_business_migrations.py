@@ -44,7 +44,7 @@ class BusinessMigrationTests(BusinessDatabaseTest):
             )
         self.assertEqual(set(names), {
             "alembic_version", "users", "auth_sessions", "threads", "messages",
-            "flight_itineraries", "hotels", "hotel_inventory",
+            "flight_itineraries", "hotels", "hotel_inventory", "tool_audit_logs",
         })
 
     async def test_foreign_keys_and_inventory_constraints(self):
