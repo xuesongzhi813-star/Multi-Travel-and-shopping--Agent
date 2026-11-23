@@ -5,6 +5,7 @@ from hashlib import blake2b
 import os
 from pathlib import Path
 import re
+from typing import Any
 
 from alembic import command
 from alembic.config import Config
@@ -83,3 +84,10 @@ async def migrate_business(engine: AsyncEngine, schema: str) -> None:
         await connection.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
         await connection.execute(CreateSchema(schema, if_not_exists=True))
         await connection.run_sync(upgrade)
+
+
+def connection_kwargs(settings: DatabaseSettings) -> dict[str, Any]:
+    return {
+        "host": "127.0.0.1", "port": settings.port, "dbname": settings.name,
+        "user": settings.user, "password": settings.password, "connect_timeout": 5,
+    }

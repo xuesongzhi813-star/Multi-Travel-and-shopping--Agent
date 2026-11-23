@@ -15,7 +15,7 @@ from psycopg.rows import dict_row
 from psycopg_pool import AsyncConnectionPool
 from sqlalchemy.exc import DBAPIError, TimeoutError as DatabasePoolTimeout
 
-from customer_support_chat.app.business.database import DatabaseSettings, local_value, validate_schema
+from customer_support_chat.app.business.database import DatabaseSettings, connection_kwargs, local_value, validate_schema
 from .parent_graph import FlightLookup, GraphResult, HotelSearch, MessageLoader, build_parent_graph
 
 
@@ -55,13 +55,6 @@ def read_checkpoint_schema(business_schema: str) -> str:
     schema = local_value("P3_CHECKPOINT_SCHEMA", "travel_checkpoints")
     validate_checkpoint_schema(business_schema, schema)
     return schema
-
-
-def connection_kwargs(settings: DatabaseSettings) -> dict[str, Any]:
-    return {
-        "host": "127.0.0.1", "port": settings.port, "dbname": settings.name,
-        "user": settings.user, "password": settings.password, "connect_timeout": 5,
-    }
 
 
 def checkpoint_kwargs(settings: DatabaseSettings, schema: str) -> dict[str, Any]:
