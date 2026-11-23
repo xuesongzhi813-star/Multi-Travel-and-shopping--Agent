@@ -3,8 +3,10 @@
 from datetime import datetime, timezone
 from uuid import UUID, uuid4
 
-from sqlalchemy import Text, Uuid, func, literal, select
+from sqlalchemy import Text, Uuid, distinct, func, literal, select
 from sqlalchemy.ext.asyncio import AsyncEngine
+
+from customer_support_chat.app.workflow.hotel_handoff import HotelOption, HotelQuery
 
 from .schema import tables
 
@@ -106,4 +108,34 @@ class BusinessRepository:
                 "arrival_at": row["arrival_at"].astimezone(timezone.utc),
             }
             for row in rows
+        ]
+
+    async def list_available_hotels(self, query: HotelQuery) -> list[HotelOption]:
+        if query.city != "Zürich":
+            return []
+        hotel, inventory = self.db.hotels, self.db.hotel_inventory
+        nights = (query.check_out - query.check_in).days
+        price = func.sum(inventory.c.price_minor)
+        statement = (
+            select(hotel.c.id, hotel.c.name, hotel.c.area, inventory.c.room_type, inventory.c.currency, price)
+            .join(inventory, hotel.c.id == inventory.c.hotel_id)
+            .where(
+                inventory.c.stay_date >= query.check_in,
+                inventory.c.stay_date < query.check_out,
+                inventory.c.quantity > 0,
+            )
+            .group_by(hotel.c.id, hotel.c.name, hotel.c.area, inventory.c.room_type, inventory.c.currency)
+            .having(func.count(distinct(inventory.c.stay_date)) == nights)
+            .order_by(inventory.c.currency, price, hotel.c.id, inventory.c.room_type)
+            .limit(5)
+        )
+        if query.area is not None:
+            statement = statement.where(hotel.c.area == query.area)
+        if query.room_type is not None:
+            statement = statement.where(inventory.c.room_type == query.room_type)
+        async with self.engine.connect() as connection:
+            rows = (await connection.execute(statement)).all()
+        return [
+            HotelOption(hotel_id, name, area, room, query.check_in, query.check_out, total, currency)
+            for hotel_id, name, area, room, currency, total in rows
         ]
