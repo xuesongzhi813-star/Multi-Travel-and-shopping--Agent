@@ -102,3 +102,26 @@ class HotelHandoffGraphTests(BusinessDatabaseTest):
                     self.assertEqual(result["status"], "unavailable")
                     self.assertEqual((await self.send(graph, "1"))["status"], "recorded")
             self.assertEqual(self.queries, [])
+
+    async def test_unrelated_text_never_answers_pending_clarification(self):
+        async with self.runtime() as graph:
+            await self.send(graph, "找落地后的酒店，住 1 晚")
+            self.assertEqual((await self.send(graph, "DEMO-A1 机上能带行李吗？"))["status"], "recorded")
+            self.assertEqual(self.flights, [])
+            self.assertEqual(self.queries, [])
+            self.assertEqual((await self.send(graph, "DEMO-A1"))["status"], "no_availability")
+
+            await self.send(graph, "找 DEMO-A1 落地后的酒店")
+            self.assertEqual((await self.send(graph, "演出连演2晚"))["status"], "recorded")
+            self.assertEqual(len(self.queries), 1)
+            outcome = await self.send(graph, "DEMO-B1，住 1 晚")
+            self.assertEqual(outcome["status"], "unavailable")
+            self.assertEqual(self.flights[-1][2], "DEMO-B1")
+            self.assertEqual(len(self.queries), 1)
+
+    async def test_negated_or_conflicting_preferences_require_clarification(self):
+        async with self.runtime() as graph:
+            for preference in ("不要市区", "不要标准房", "机场附近或市中心"):
+                outcome = await self.send(graph, f"找 DEMO-A1 的酒店，住 1 晚，{preference}")
+                self.assertEqual(outcome["status"], "needs_clarification")
+            self.assertEqual(self.queries, [])

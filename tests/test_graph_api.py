@@ -1,9 +1,12 @@
 import asyncio
 from contextlib import AsyncExitStack
 from unittest.mock import patch
+import subprocess
+import sys
 from uuid import UUID, uuid4
 
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
 from sqlalchemy.schema import DropSchema
 
 from customer_support_chat.app.business.demo_seed import seed_demo
@@ -13,6 +16,8 @@ from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
 from test_business_migrations import BusinessDatabaseTest
 from test_business_seed import PASSWORDS
 from web_app.app.runtime import create_app
+from web_app.app.local_tools import LocalToolTimeout
+from web_app.app import local_tools
 
 
 class GraphApiTests(BusinessDatabaseTest):
@@ -220,3 +225,80 @@ class GraphApiTests(BusinessDatabaseTest):
         history = (await client.get(path)).json()
         self.assertEqual(history["messages"][0]["message_id"], response.json()["message_id"])
         self.assertIsNone(history["graph"])
+
+    async def test_hotel_handoff_restarts_and_preserves_thread_isolation(self):
+        path = await self.thread(self.a)
+        thread = UUID(path.rsplit("/", 1)[-1])
+        first = await self.send(self.a, path, "帮我找 DEMO-A1 落地后的酒店")
+        self.assertEqual(first.status_code, 201)
+        self.assertEqual((first.json()["status"], first.json()["reply"]),
+                         ("needs_clarification", "您打算住几晚？"))
+        denied = await self.send(self.b, path, "住 1 晚")
+        self.assertEqual(denied.status_code, 404)
+        self.assertEqual((await self.b.get(path)).status_code, 404)
+        audit = self.db.tool_audit_logs
+        stock = select(self.db.hotel_inventory.c.quantity).where(self.db.hotel_inventory.c.hotel_id == "demo-airport")
+        async with self.engine.connect() as connection:
+            before_quantity = (await connection.execute(stock)).scalar_one()
+        async with self.engine.connect() as connection:
+            tools = (await connection.execute(select(audit.c.tool_name).where(audit.c.thread_id == thread))).scalars().all()
+        self.assertNotIn("search_hotel_inventory", tools)
+
+        restarted, _ = await self.client(0)
+        answer = await self.send(restarted, path, "住 1 晚")
+        self.assertEqual(answer.status_code, 201)
+        body = answer.json()
+        self.assertEqual(body["status"], "hotel_results")
+        self.assertEqual(len(body["hotel_options"]), 1)
+        option = body["hotel_options"][0]
+        self.assertEqual((option["check_in"], option["check_out"], option["room_type"], option["total_minor"]),
+                         ("2026-12-15", "2026-12-16", "standard", 18000))
+        graph = (await restarted.get(path)).json()["graph"]
+        self.assertEqual(graph["hotel_options"], body["hotel_options"])
+        self.assertNotIn("hotel_pending", graph)
+        async with self.engine.connect() as connection:
+            records = (await connection.execute(select(audit.c.tool_name).where(audit.c.thread_id == thread))).scalars().all()
+        self.assertIn("lookup_flight", records)
+        self.assertEqual(records.count("search_hotel_inventory"), 1)
+        async with self.engine.connect() as connection:
+            self.assertEqual((await connection.execute(stock)).scalar_one(), before_quantity)
+
+        foreign = await self.send(restarted, path, "找 DEMO-B1 的酒店，住 1 晚")
+        absent = await self.send(restarted, path, "找 DEMO-A99 的酒店，住 1 晚")
+        self.assertEqual((foreign.json()["status"], foreign.json()["reply"]),
+                         (absent.json()["status"], absent.json()["reply"]))
+        self.assertEqual(foreign.json()["status"], "unavailable")
+
+    async def test_hotel_worker_timeout_releases_thread_for_next_turn(self):
+        path = await self.thread(self.a)
+        with patch("web_app.app.runtime.run_local_tool", side_effect=LocalToolTimeout("budget")):
+            failed = await self.send(self.a, path, "找 DEMO-A1 的酒店，住 1 晚")
+        self.assertEqual((failed.status_code, failed.json()["status"]), (201, "unavailable"))
+        latest = await self.send(self.a, path, "继续行程")
+        self.assertEqual(latest.json()["status"], "recorded")
+        self.assertEqual((await self.a.get(path)).json()["graph"]["message_id"], latest.json()["message_id"])
+
+    async def test_worker_process_is_reaped_on_timeout_and_cancel(self):
+        for cancel in (False, True):
+            with self.subTest(cancel=cancel):
+                started = asyncio.Event()
+                processes = []
+                popen = subprocess.Popen
+
+                def launch(argv, **kwargs):
+                    child = popen([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+                    processes.append(child)
+                    started.set()
+                    return child
+
+                with patch.object(local_tools.subprocess, "Popen", side_effect=launch):
+                    task = asyncio.create_task(local_tools.run_role_process(
+                        {}, "{}", timeout=15 if cancel else 0.5,
+                    ))
+                    if cancel:
+                        await asyncio.wait_for(started.wait(), timeout=5)
+                        task.cancel()
+                    with self.assertRaises(asyncio.CancelledError if cancel else LocalToolTimeout):
+                        await task
+                self.assertEqual(len(processes), 1)
+                self.assertIsNotNone(processes[0].poll())

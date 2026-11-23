@@ -19,6 +19,9 @@ from customer_support_chat.app.business.database import DatabaseSettings, local_
 from .parent_graph import FlightLookup, GraphResult, HotelSearch, MessageLoader, build_parent_graph
 
 
+ROLE_GRAPH_TIMEOUT = 40
+
+
 class GraphUnavailable(RuntimeError):
     """The outcome of this graph operation could not be confirmed."""
 
@@ -114,7 +117,7 @@ class GraphRuntime:
 
     async def _invoke(self, user_id: UUID, thread_id: UUID, message_id: UUID) -> GraphResult:
         try:
-            async with asyncio.timeout(20):
+            async with asyncio.timeout(ROLE_GRAPH_TIMEOUT if self.hotel_search is not None else 20):
                 prior = await self.read(thread_id)
                 await self.graph.ainvoke(
                     {

@@ -20,6 +20,8 @@ class UnifiedHomeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("旅行客服", result.text)
         self.assertIn("/api/tools/flight", result.text)
         self.assertIn("/api/tools/airport", result.text)
+        self.assertIn("hotel_options", result.text)
+        self.assertIn("演示总价", result.text)
 
     async def test_health_liveness_needs_no_database(self):
         result = await self.client.get("/health/live")

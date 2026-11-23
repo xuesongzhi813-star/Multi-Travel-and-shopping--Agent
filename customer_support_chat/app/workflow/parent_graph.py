@@ -99,6 +99,10 @@ def build_parent_graph(
             return complete(state, "recorded")
         if turn.action == "cancel":
             return complete(state, "recorded", "已取消酒店查询。") | {"hotel_pending": None, "hotel_arrival": None}
+        if turn.action == "clarify_filters":
+            return complete(state, "needs_clarification", "请明确想住的区域或房型，并重新发送酒店请求。") | {
+                "hotel_pending": None, "hotel_arrival": None,
+            }
         pending = turn.request
         assert pending is not None
         reference = pending.get("reference")

@@ -53,3 +53,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-local.ps1 -Action 
 ```
 
 停止保留 PostgreSQL 和 Qdrant 命名卷。Redis 配置为临时缓存。再次执行同一启动命令即可重启。排查入口见 [TROUBLESHOOTING](TROUBLESHOOTING.md)。
+
+## P6 航班到酒店演示
+
+登录 demo-a，在会话中发送「帮我找 DEMO-A1 落地后的酒店」。收到「您打算住几晚？」后，发送「住 1 晚」。应用以航班到达地日期 2026-12-15 查询至 2026-12-16 的合成库存，显示标准房演示总价 CHF 180.00。待补充的晚数保存在会话检查点，重启后可在原会话继续。P6 聊天场景使用离线角色脚本与真实本机存储，预订由后续阶段提供。

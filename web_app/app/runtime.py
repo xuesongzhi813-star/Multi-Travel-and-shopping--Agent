@@ -2,8 +2,9 @@
 
 import asyncio
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 from pathlib import Path
 import re
@@ -22,7 +23,10 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from customer_support_chat.app.business.auth import hash_password, verify_password
 from customer_support_chat.app.business.database import DatabaseSettings, create_engine, read_settings
 from customer_support_chat.app.business.repository import BusinessRepository
-from customer_support_chat.app.workflow.checkpoints import GraphUnavailable, open_graph_runtime, read_checkpoint_schema
+from customer_support_chat.app.workflow.checkpoints import (
+    ROLE_GRAPH_TIMEOUT, GraphUnavailable, open_graph_runtime, read_checkpoint_schema,
+)
+from customer_support_chat.app.workflow.hotel_handoff import HotelOption, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival
 from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
 from customer_support_chat.app.workflow.thread_lock import try_thread_lock
 
@@ -34,6 +38,8 @@ from .operations import error_response, http_error, observe_request, postgres_sc
 COOKIE_NAME = "travel_session"
 SESSION_SECONDS = 8 * 60 * 60
 MAX_ACTIVE_TURNS = 4
+ROLE_TURN_BUDGET = ROLE_GRAPH_TIMEOUT - 2
+role_turn: ContextVar[tuple[UUID, float]] = ContextVar("role_turn")
 TOKEN_PATTERN = re.compile(r"[A-Za-z0-9_-]{43}")
 POSTGRES_TEXT = r"^[^\x00]+$"
 
@@ -112,7 +118,62 @@ def create_app(
             app.state.live_active = False
             app.state.engine = engine
             app.state.dummy_password_hash = await asyncio.to_thread(hash_password, token_urlsafe(32))
-            async with open_graph_runtime(config, schema, repository.read_owned_message) as graph:
+            async def role_tool(operation: str, user: UUID, thread: UUID, value: str | dict) -> dict:
+                request_id, deadline = role_turn.get()
+                slots = app.state.tool_slots
+                if slots.locked():
+                    raise RoleUnavailable("Local tools are busy")
+                try:
+                    async with slots:
+                        return await run_local_tool(
+                            operation, user, value, config, request_id,
+                            flight_mode="offline", thread_id=thread, deadline=deadline,
+                        )
+                except LocalToolError as error:
+                    raise RoleUnavailable("Local role failed") from error
+
+            async def flight_lookup(user: UUID, thread: UUID, reference: str) -> VerifiedArrival | None:
+                result = await role_tool("flight", user, thread, reference)
+                if result.get("status") == "not_found":
+                    return None
+                try:
+                    handoff, airport = result["handoff"], result["airport"]
+                    if result["status"] != "verified" or airport["status"] != "ok":
+                        raise ValueError("Unverified flight or airport")
+                    airport_data = airport["data"]
+                    if airport_data["code"] != handoff["arrival_airport"]:
+                        raise ValueError("Airport evidence mismatch")
+                    return VerifiedArrival(
+                        handoff["reference"], airport_data["city"] or "", airport_data["code"],
+                        date.fromisoformat(handoff["arrival_date_local"]), handoff["arrival_timezone"],
+                        handoff["source_tool_call_id"],
+                    )
+                except (KeyError, TypeError, ValueError) as error:
+                    raise RoleUnavailable("Invalid flight receipt") from error
+
+            async def hotel_search(user: UUID, thread: UUID, query: HotelQuery) -> HotelRoleResult:
+                result = await role_tool("hotel", user, thread, query.to_json())
+                status = result.get("status")
+                if status in ("unavailable", "no_availability"):
+                    return HotelRoleResult(status)
+                try:
+                    if status != "hotel_results":
+                        raise ValueError("Invalid hotel outcome")
+                    options = tuple(HotelOption.from_json(row) for row in result["options"])
+                    if not 1 <= len(options) <= 5 or any(
+                        option.check_in != query.check_in or option.check_out != query.check_out
+                        or (query.area is not None and option.area != query.area)
+                        or (query.room_type is not None and option.room_type != query.room_type)
+                        for option in options
+                    ):
+                        raise ValueError("Invalid hotel options")
+                    return HotelRoleResult("hotel_results", options)
+                except (KeyError, TypeError, ValueError) as error:
+                    raise RoleUnavailable("Invalid hotel receipt") from error
+
+            async with open_graph_runtime(
+                config, schema, repository.read_owned_message, flight_lookup=flight_lookup, hotel_search=hotel_search,
+            ) as graph:
                 app.state.graph = graph
                 yield
         finally:
@@ -269,7 +330,11 @@ def create_app(
                 message_id = await repository.append_message(identity.user_id, thread_id, body.content)
                 if message_id is None:
                     raise HTTPException(404, "Thread not found")
-                result = await state.graph.invoke(identity.user_id, thread_id, message_id, connection=connection)
+                token = role_turn.set((request.state.request_id, asyncio.get_running_loop().time() + ROLE_TURN_BUDGET))
+                try:
+                    result = await state.graph.invoke(identity.user_id, thread_id, message_id, connection=connection)
+                finally:
+                    role_turn.reset(token)
         except (GraphUnavailable, PostgresError):
             context = {"message_id": str(message_id)} if message_id is not None else {}
             return error_response(request, 503, "graph_unavailable", "Graph turn unavailable", **context)
@@ -278,6 +343,9 @@ def create_app(
         response = {"message_id": message_id, "status": result["status"]}
         if result["status"] == "rejected":
             response["reply"] = REFUSAL_MESSAGE
+        for field in ("reply", "hotel_options"):
+            if field in result:
+                response[field] = result[field]
         return response
 
     @app.get("/api/me/itineraries")

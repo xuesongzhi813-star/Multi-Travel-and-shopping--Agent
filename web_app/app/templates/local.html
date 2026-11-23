@@ -36,7 +36,7 @@ small { color: #486156; }
 <div id="app-panel" hidden>
 <section><header><h2>会话</h2><button id="logout" type="button">退出</button></header>
 <form id="session"><button id="new-thread" type="button">新建会话</button><input id="thread" aria-label="会话 ID" placeholder="会话 ID"><button>打开会话</button></form>
-<small id="graph"></small><ul id="messages"></ul>
+<small id="graph"></small><ul id="messages"></ul><p id="hotel-reply" aria-live="polite"></p><ul id="hotel-options"></ul>
 <form id="send"><input name="content" aria-label="消息" placeholder="输入消息" required maxlength="4000"><button>发送</button></form></section>
 <div class="grid"><article><h2>本人航班</h2><p><small>合成行程 · 结果标明模型模式与机场数据来源</small></p><form id="flight"><select id="flights" aria-label="航班"><option value="">选择航班</option></select><button>查航班</button></form><pre id="flight-result"></pre></article>
 <article><h2>机场城市</h2><p><small>本地 MCP 示例目录</small></p><form id="airport"><input name="code" aria-label="机场代码" value="ZRH" maxlength="3" required><button>查城市</button></form><pre id="airport-result"></pre></article></div>
@@ -71,6 +71,17 @@ async function loadFlights() {
   for (const row of rows) $('flights').add(new Option(row.reference+' · '+row.origin+' → '+row.destination,row.reference));
 }
 function threadPath() { return '/api/threads/'+encodeURIComponent($('thread').value.trim()); }
+function renderHotel(result) {
+  $('hotel-reply').textContent = result?.reply || '';
+  $('hotel-options').replaceChildren();
+  for (const option of result?.hotel_options || []) {
+    const item = document.createElement('li');
+    const price = (option.total_minor / 100).toFixed(2) + ' ' + option.currency;
+    item.textContent = option.hotel_name + ' · ' + option.room_type + ' · ' +
+      option.check_in + ' 至 ' + option.check_out + ' · 演示总价 ' + price;
+    $('hotel-options').append(item);
+  }
+}
 async function loadThread() {
   const state = await api(threadPath());
   $('messages').replaceChildren();
@@ -82,6 +93,7 @@ form('login',async data => {
 });
 $('logout').addEventListener('click',async () => {
   try { await api('/api/auth/logout',{}); } finally {
+    renderHotel(null);
     panel(false); $('thread').value=''; $('messages').replaceChildren();
     for (const key of ['graph','flight-result','airport-result']) $(key).textContent='';
   }

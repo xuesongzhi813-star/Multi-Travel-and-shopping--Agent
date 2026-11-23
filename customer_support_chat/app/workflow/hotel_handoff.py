@@ -85,13 +85,25 @@ class HotelPending(TypedDict, total=False):
 
 @dataclass(frozen=True)
 class HotelTurn:
-    action: Literal["ordinary", "cancel", "hotel"]
+    action: Literal["ordinary", "cancel", "hotel", "clarify_filters"]
     request: HotelPending | None = None
 
 
 REFERENCE = re.compile(r"(?<![A-Z0-9-])DEMO-[A-Z][0-9]{1,3}(?![A-Z0-9-])", re.ASCII)
 NIGHTS = re.compile(r"(?<![0-9.])(-?[0-9]+)\s*晚")
 CHECK_OUT = re.compile(r"(?:退房(?:日期)?\s*[:：]?\s*([0-9]{4}-[0-9]{2}-[0-9]{2})|([0-9]{4}-[0-9]{2}-[0-9]{2})\s*退房)")
+
+
+STAY_REPLY = re.compile(
+    rf"(?:{NIGHTS.pattern}(?:[ ,，、]+{CHECK_OUT.pattern})?|{CHECK_OUT.pattern})"
+)
+AREA_AIRPORT = re.compile(r"机场附近|机场酒店|机场区域")
+AREA_CITY = re.compile(r"市区|市中心")
+STANDARD_ROOM = re.compile(r"标准房|\bstandard\b", re.IGNORECASE)
+AMBIGUOUS_FILTER = re.compile(
+    rf"(?:不要|不想(?:住|要)?|不考虑|避开|不选|不住)\s*(?:{AREA_AIRPORT.pattern}|"
+    rf"{AREA_CITY.pattern}|{STANDARD_ROOM.pattern})", re.IGNORECASE,
+)
 
 
 def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
@@ -102,17 +114,29 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
     new_request = ("酒店" in text or "住宿" in text) and (
         references or any(word in text for word in ("找", "查", "推荐", "落地", "到达"))
     )
+    bare_reply = text.rstrip("。.!！").strip()
+    reference_only = REFERENCE.fullmatch(bare_reply.upper())
+    reference_prefix = REFERENCE.match(bare_reply.upper())
+    stay_text = bare_reply
+    if reference_prefix is not None:
+        stay_text = bare_reply[reference_prefix.end():].lstrip(" ,，、")
+    stay_reply = STAY_REPLY.fullmatch(stay_text.removeprefix("我要住").removeprefix("住").strip())
     nights = NIGHTS.findall(text)
     dates = [first or second for first, second in CHECK_OUT.findall(text)]
-    if pending is not None and pending["waiting"] == "nights" and re.fullmatch(r"-?[0-9]+", text):
-        nights = [text]
 
     if new_request:
         request: HotelPending = {"reference": references[0] if len(references) == 1 else None}
-    elif pending is not None and pending["waiting"] == "reference" and len(references) == 1:
-        request = {**pending, "reference": references[0]}
-    elif pending is not None and pending["waiting"] == "nights" and (nights or dates):
+    elif pending is None:
+        return HotelTurn("ordinary")
+    elif reference_prefix is not None and (reference_only or stay_reply):
+        request = {"reference": reference_prefix[0]}
+        if pending["waiting"] == "reference":
+            request = {**pending, **request}
+    elif stay_reply:
         request = {**pending, "nights": None, "check_out": None}
+    elif pending["waiting"] == "nights" and re.fullmatch(r"-?[0-9]+", bare_reply):
+        request = {**pending, "nights": None, "check_out": None}
+        nights = [bare_reply]
     else:
         return HotelTurn("ordinary")
 
@@ -120,11 +144,12 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
         request["nights"] = int(nights[0]) if len(set(nights)) == 1 and len(nights[0]) <= 3 else 0
     if dates:
         request["check_out"] = dates[0] if len(set(dates)) == 1 else "invalid"
-    if any(term in text for term in ("机场附近", "机场酒店", "机场区域")):
-        request["area"] = "airport"
-    if any(term in text for term in ("市区", "市中心")):
-        request["area"] = "city"
-    if "标准房" in text or re.search(r"\bstandard\b", text, re.IGNORECASE):
+    airport, city = AREA_AIRPORT.search(text), AREA_CITY.search(text)
+    if AMBIGUOUS_FILTER.search(text) or (airport and city):
+        return HotelTurn("clarify_filters")
+    if airport or city:
+        request["area"] = "airport" if airport else "city"
+    if STANDARD_ROOM.search(text):
         request["room_type"] = "standard"
     return HotelTurn("hotel", request)
 
