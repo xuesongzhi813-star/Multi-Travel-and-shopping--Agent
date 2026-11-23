@@ -11,7 +11,7 @@ from psycopg.types.json import Jsonb
 
 from customer_support_chat.app.workflow.hotel_handoff import HotelOption
 
-from .booking import BookingDecision, BookingOwner, BookingScope, BookingSelection, ProposalConflict, ProposalNotFound, ProposalView
+from .booking import BookingDecision, BookingOwner, BookingResolution, BookingScope, BookingSelection, ProposalConflict, ProposalNotFound, ProposalView
 from .database import DatabaseSettings, connection_kwargs, validate_schema
 
 
@@ -162,3 +162,53 @@ class BookingRepository:
             (status, action_id),
         )
         return await cursor.fetchone()
+
+    async def resolve_action(self, scope: BookingScope) -> BookingResolution:
+        async with self._connection() as connection:
+            row = await self._select(connection, scope.owner, sql.SQL("AND p.action_id=%s"), (scope.action_id,), lock=True)
+            if row is None:
+                raise ProposalNotFound()
+            # Read again after acquiring the action row lock. A prior transaction
+            # may have committed its receipt while this query was waiting.
+            receipt = await (await connection.execute(
+                sql.SQL("SELECT booking_id FROM {} WHERE action_id=%s").format(self.receipts), (scope.action_id,),
+            )).fetchone()
+            if receipt is not None:
+                return BookingResolution(self._view(row | receipt), reused_receipt=True)
+            if row["status"] in {"rejected", "expired", "stale"}:
+                return BookingResolution(self._view(row))
+            if row["status"] == "booked":
+                raise ProposalConflict("missing_booking_receipt")
+            now = await self._now(connection)
+            if row["expires_at"] <= now:
+                return await self._finish(connection, scope.action_id, "expired")
+            if row["decision"] is None:
+                raise ProposalConflict("decision_required")
+            if row["decision"] == "reject":
+                return await self._finish(connection, scope.action_id, "rejected")
+
+            stock = await self._stock(
+                connection, row["hotel_id"], row["room_type"], row["check_in"], row["check_out"], lock=True,
+            )
+            if row["expires_at"] <= await self._now(connection):
+                return await self._finish(connection, scope.action_id, "expired")
+            if self._snapshot(stock) != row["night_snapshot"] or any(night["quantity"] <= 0 for night in stock):
+                return await self._finish(connection, scope.action_id, "stale")
+
+            result = await connection.execute(sql.SQL(
+                "UPDATE {} SET quantity=quantity-1 WHERE hotel_id=%s AND room_type=%s AND stay_date>=%s AND stay_date<%s"
+            ).format(self.inventory), (row["hotel_id"], row["room_type"], row["check_in"], row["check_out"]))
+            if result.rowcount != len(stock):
+                raise ProposalConflict("inventory_count_changed")
+            booking_id = uuid4()
+            await connection.execute(sql.SQL(
+                "INSERT INTO {} (action_id,booking_id) VALUES (%s,%s)"
+            ).format(self.bookings), (scope.action_id, booking_id))
+            await connection.execute(sql.SQL(
+                "INSERT INTO {} (action_id,booking_id) VALUES (%s,%s)"
+            ).format(self.receipts), (scope.action_id, booking_id))
+            done = await self._set_status(connection, scope.action_id, "booked")
+            return BookingResolution(self._view(done | {"booking_id": booking_id}))
+
+    async def _finish(self, connection, action_id, status):
+        return BookingResolution(self._view(await self._set_status(connection, action_id, status)))

@@ -18,7 +18,7 @@ from test_business_migrations import BusinessDatabaseTest
 from test_business_seed import PASSWORDS
 
 
-class BookingRepositoryTests(BusinessDatabaseTest):
+class BookingRepositoryFixture(BusinessDatabaseTest):
     async def asyncSetUp(self):
         await super().asyncSetUp()
         await seed_demo(self.engine, self.settings.schema, PASSWORDS)
@@ -37,6 +37,7 @@ class BookingRepositoryTests(BusinessDatabaseTest):
         async with await AsyncConnection.connect(**connection_kwargs(self.settings), row_factory=dict_row) as connection:
             return await self.booking.create_proposal(connection, self.owner, self.selection, option or self.option)
 
+class BookingRepositoryTests(BookingRepositoryFixture):
     async def test_proposal_is_owned_snapshotted_and_replayable(self):
         with self.assertRaises(ProposalConflict):
             await self.create(replace(self.option, total_minor=1))

@@ -57,6 +57,12 @@ class ProposalView:
         }
 
 
+@dataclass(frozen=True)
+class BookingResolution:
+    proposal: ProposalView
+    reused_receipt: bool = False
+
+
 class ProposalNotFound(LookupError):
     """No proposal exists for this authenticated owner and scope."""
 

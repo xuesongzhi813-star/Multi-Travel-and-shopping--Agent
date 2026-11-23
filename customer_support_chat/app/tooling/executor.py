@@ -189,13 +189,17 @@ class ToolExecutor:
         return result
 
     async def _write_audit(self, record: ToolExecutionRecord) -> None:
-        try:
-            async with asyncio.timeout(self._audit_timeout):
-                await self._audit_sink.write(record)
-        except asyncio.CancelledError:
-            logger.warning("tool_audit_failed run_id=%s category=cancelled", record.run_id)
-            raise
-        except TimeoutError:
-            logger.warning("tool_audit_failed run_id=%s category=timeout", record.run_id)
-        except Exception:
-            logger.warning("tool_audit_failed run_id=%s category=write_failed", record.run_id)
+        await write_tool_audit(self._audit_sink, record, timeout=self._audit_timeout)
+
+
+async def write_tool_audit(sink: AuditSink, record: ToolExecutionRecord, *, timeout: float) -> None:
+    try:
+        async with asyncio.timeout(timeout):
+            await sink.write(record)
+    except asyncio.CancelledError:
+        logger.warning("tool_audit_failed run_id=%s category=cancelled", record.run_id)
+        raise
+    except TimeoutError:
+        logger.warning("tool_audit_failed run_id=%s category=timeout", record.run_id)
+    except Exception:
+        logger.warning("tool_audit_failed run_id=%s category=write_failed", record.run_id)
