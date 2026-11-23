@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from hashlib import sha256
+from pathlib import Path
 import re
 from secrets import token_urlsafe
 from typing import Annotated
@@ -13,7 +14,7 @@ from uuid import UUID
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from psycopg import Error as PostgresError
 from pydantic import BaseModel, ConfigDict, StringConstraints
 
@@ -23,6 +24,9 @@ from customer_support_chat.app.business.repository import BusinessRepository
 from customer_support_chat.app.workflow.checkpoints import GraphUnavailable, open_graph_runtime, read_checkpoint_schema
 from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
 from customer_support_chat.app.workflow.thread_lock import try_thread_lock
+
+
+from .local_tools import run_local_tool
 
 
 COOKIE_NAME = "travel_session"
@@ -39,6 +43,14 @@ class RequestBody(BaseModel):
 class LoginRequest(RequestBody):
     username: Annotated[str, StringConstraints(min_length=1, max_length=80, strip_whitespace=True, pattern=POSTGRES_TEXT)]
     password: Annotated[str, StringConstraints(min_length=1, max_length=256)]
+
+
+class FlightRequest(RequestBody):
+    reference: Annotated[str, StringConstraints(pattern=r"^DEMO-[A-Z][0-9]{1,3}$")]
+
+
+class AirportRequest(RequestBody):
+    code: Annotated[str, StringConstraints(pattern=r"^[A-Z]{3}$")]
 
 
 class MessageRequest(RequestBody):
@@ -92,6 +104,7 @@ def create_app(
             app.state.database_settings = config
             app.state.checkpoint_schema = schema
             app.state.active_threads = set()
+            app.state.tool_slots = asyncio.Semaphore(2)
             app.state.dummy_password_hash = await asyncio.to_thread(hash_password, token_urlsafe(32))
             async with open_graph_runtime(config, schema, repository.read_owned_message) as graph:
                 app.state.graph = graph
@@ -111,6 +124,28 @@ def create_app(
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, error: RequestValidationError):
         return JSONResponse(status_code=422, content={"detail": "Invalid request"})
+
+    @app.get("/", response_class=FileResponse, include_in_schema=False)
+    async def home():
+        return FileResponse(Path(__file__).with_name("templates") / "local.html", media_type="text/html")
+
+    async def local_tool(request: Request, identity: Principal, operation: str, value: str):
+        slots = request.app.state.tool_slots
+        if slots.locked():
+            raise HTTPException(503, "本地工具繁忙")
+        try:
+            async with slots:
+                return await run_local_tool(operation, identity.user_id, value, request.app.state.database_settings)
+        except RuntimeError:
+            raise HTTPException(503, "本地工具暂不可用") from None
+
+    @app.post("/api/tools/flight")
+    async def flight_tool(body: FlightRequest, request: Request, identity: Identity):
+        return await local_tool(request, identity, "flight", body.reference)
+
+    @app.post("/api/tools/airport")
+    async def airport_tool(body: AirportRequest, request: Request, identity: Identity):
+        return await local_tool(request, identity, "airport", body.code)
 
     @app.post("/api/auth/login", status_code=204)
     async def login(body: LoginRequest, request: Request, response: Response, repository: Database) -> None:

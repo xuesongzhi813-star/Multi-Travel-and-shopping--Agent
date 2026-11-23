@@ -1,0 +1,106 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>旅行客服</title>
+<style>
+:root { font: 16px/1.55 system-ui, sans-serif; color: #142923; background: #f4f7f5; }
+body { margin: 0; }
+main { max-width: 950px; margin: auto; padding: 30px 20px; }
+header { display: flex; justify-content: space-between; align-items: center; gap: 12px; }
+h1 { font-size: 2.2rem; margin: 0; }
+h2 { font-size: 1.1rem; margin: 0 0 12px; }
+p { margin: .4em 0; }
+a { color: #245c49; }
+form { display: flex; gap: 10px; flex-wrap: wrap; }
+section, article { background: white; border: 1px solid #d6e1dc; border-radius: 12px; padding: 18px; margin: 14px 0; }
+.grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.grid article { margin: 0; }
+input, button, select { font: inherit; padding: 8px 11px; border: 1px solid #afc2ba; border-radius: 7px; background: white; }
+button { background: #245c49; color: white; cursor: pointer; }
+button:disabled { opacity: .55; cursor: wait; }
+pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .88rem; }
+small { color: #486156; }
+[hidden] { display: none !important; }
+#status { min-height: 1.6em; }
+#messages { padding-left: 20px; overflow-wrap: anywhere; }
+@media (max-width: 650px) { .grid { grid-template-columns: 1fr; } }
+</style>
+<main>
+<header><h1>旅行客服</h1><a href="/docs">API 文档</a></header>
+<p id="status" role="status"></p>
+<section id="login-panel">
+<h2>演示登录</h2>
+<form id="login"><input name="username" value="demo-a" aria-label="账号" required autocomplete="username"><input name="password" type="password" aria-label="密码" placeholder="本地演示密码" required autocomplete="current-password"><button>登录</button></form>
+</section>
+<div id="app-panel" hidden>
+<section><header><h2>会话</h2><button id="logout" type="button">退出</button></header>
+<form id="session"><button id="new-thread" type="button">新建会话</button><input id="thread" aria-label="会话 ID" placeholder="会话 ID"><button>打开会话</button></form>
+<small id="graph"></small><ul id="messages"></ul>
+<form id="send"><input name="content" aria-label="消息" placeholder="输入消息" required maxlength="4000"><button>发送</button></form></section>
+<div class="grid"><article><h2>本人航班</h2><p><small>本地脚本模型 · 合成行程</small></p><form id="flight"><select id="flights" aria-label="航班"><option value="">选择航班</option></select><button>查航班</button></form><pre id="flight-result"></pre></article>
+<article><h2>机场城市</h2><form id="airport"><input name="code" aria-label="机场代码" value="ZRH" maxlength="3" required><button>查城市</button></form><pre id="airport-result"></pre></article></div>
+</div>
+</main>
+<script>
+const $ = id => document.getElementById(id);
+async function api(path, body) {
+  const options = body === undefined ? {} : {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(body)};
+  const response = await fetch(path, options);
+  const data = response.status === 204 ? null : await response.json();
+  if (!response.ok) throw new Error(data?.detail || String(response.status));
+  return data;
+}
+function panel(loggedIn) { $('app-panel').hidden = !loggedIn; $('login-panel').hidden = loggedIn; }
+function form(id, action) {
+  $(id).addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget, button = event.submitter;
+    if (button) button.disabled = true;
+    try { $('status').textContent = ''; await action(new FormData(form)); }
+    catch (err) { $('status').textContent = err.message; }
+    finally { if (button) button.disabled = false; }
+  });
+}
+async function loadFlights() {
+  const rows = await api('/api/me/itineraries');
+  $('flights').replaceChildren(new Option('选择航班', ''));
+  for (const row of rows) $('flights').add(new Option(row.reference+' · '+row.origin+' → '+row.destination,row.reference));
+}
+function threadPath() { return '/api/threads/'+encodeURIComponent($('thread').value.trim()); }
+async function loadThread() {
+  const state = await api(threadPath());
+  $('messages').replaceChildren();
+  for (const message of state.messages) { const item=document.createElement('li'); item.textContent=message.content; $('messages').append(item); }
+  $('graph').textContent = state.graph ? '已完成第 '+state.graph.turn_count+' 轮 · '+state.graph.status : '会话尚无处理结果';
+}
+form('login',async data => {
+  await api('/api/auth/login',Object.fromEntries(data)); $('login').reset(); panel(true); await loadFlights();
+});
+$('logout').addEventListener('click',async () => {
+  try { await api('/api/auth/logout',{}); } finally {
+    panel(false); $('thread').value=''; $('messages').replaceChildren();
+    for (const key of ['graph','flight-result','airport-result']) $(key).textContent='';
+  }
+});
+$('new-thread').addEventListener('click',async () => {
+  try { const t = await api('/api/threads',{}); $('thread').value=t.thread_id; await loadThread(); }
+  catch(err){ $('status').textContent=err.message; }
+});
+form('session',loadThread);
+form('send',async data => {
+  if (!$('thread').value) throw new Error('请先新建或打开会话');
+  const result=await api(threadPath()+'/messages',{content:data.get('content')});
+  await loadThread(); $('send').reset();
+  $('status').textContent=result.reply || '已保存消息';
+});
+form('flight',async () => {
+  if (!$('flights').value) throw new Error('请选择航班');
+  $('flight-result').textContent=JSON.stringify(await api('/api/tools/flight',{reference:$('flights').value}),null,2);
+});
+form('airport',async data => {
+  $('airport-result').textContent=JSON.stringify(await api('/api/tools/airport',{code:data.get('code').toUpperCase()}),null,2);
+});
+loadFlights().then(()=>panel(true)).catch(()=>panel(false));
+</script>
+</html>
