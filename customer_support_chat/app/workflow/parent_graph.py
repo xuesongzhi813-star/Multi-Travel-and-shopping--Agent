@@ -10,6 +10,7 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from customer_support_chat.app.business.booking import BookingOwner, BookingResolution, BookingScope
 from customer_support_chat.app.tooling.executor import valid_tool_call_id
 from .hotel_handoff import (
     HotelPending, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival,
@@ -22,6 +23,8 @@ MessageLoader = Callable[[UUID, UUID, UUID], Awaitable[str | None]]
 GuardEvaluator = Callable[[str], Awaitable[GuardDecision]]
 FlightLookup = Callable[[UUID, UUID, str], Awaitable[VerifiedArrival | None]]
 HotelSearch = Callable[[UUID, UUID, HotelQuery], Awaitable[HotelRoleResult]]
+BookingExecutor = Callable[[BookingScope, UUID], Awaitable[BookingResolution]]
+BOOKING_NODE = "apply_booking_decision"
 TurnStatus = Literal["recorded", "rejected", "needs_clarification", "hotel_results", "no_availability", "unavailable"]
 RETRY_HOTEL = "暂时无法完成酒店查询，请重新发送包含航班和晚数的完整请求。"
 REFUSAL_MESSAGE = "这条消息无法处理，请改问你自己的旅行安排。"
@@ -51,6 +54,7 @@ class GraphState(TypedDict, total=False):
     completed: GraphResult
     hotel_pending: HotelPending | None
     hotel_arrival: dict[str, str] | None
+    booking_action_id: str | None
 
 
 async def evaluate_input(content: str) -> GuardDecision:
@@ -65,6 +69,7 @@ def build_parent_graph(
     decide: GuardEvaluator = evaluate_input,
     flight_lookup: FlightLookup | None = None,
     hotel_search: HotelSearch | None = None,
+    booking_execute: BookingExecutor | None = None,
 ) -> CompiledStateGraph:
     async def check_input(state: GraphState, config: RunnableConfig) -> GraphState:
         content = await load_message(
@@ -163,8 +168,29 @@ def build_parent_graph(
     builder.add_node("check_input", check_input)
     builder.add_node("allow", allow)
     builder.add_node("reject", lambda state: complete(state, "rejected"))
-    builder.add_edge(START, "check_input")
+    if booking_execute is None:
+        builder.add_edge(START, "check_input")
+    else:
+        async def apply_booking_decision(state: GraphState, config: RunnableConfig) -> GraphState:
+            values = config["configurable"]
+            scope = BookingScope(
+                BookingOwner(UUID(state["user_id"]), UUID(values["thread_id"])),
+                UUID(state["booking_action_id"]),
+            )
+            await booking_execute(scope, UUID(values["booking_request_id"]))
+            return {"booking_action_id": None}
+
+        builder.add_node("prepare_booking", lambda state: {"booking_action_id": state["booking_action_id"]})
+        builder.add_node(BOOKING_NODE, apply_booking_decision)
+        builder.add_conditional_edges(
+            START, lambda state: bool(state.get("booking_action_id")),
+            {True: "prepare_booking", False: "check_input"},
+        )
+        builder.add_edge("prepare_booking", BOOKING_NODE)
+        builder.add_edge(BOOKING_NODE, END)
     builder.add_conditional_edges("check_input", route, {"allow": "allow", "reject": "reject"})
     builder.add_edge("allow", END)
     builder.add_edge("reject", END)
-    return builder.compile(checkpointer=checkpointer)
+    return builder.compile(
+        checkpointer=checkpointer, interrupt_before=[BOOKING_NODE] if booking_execute is not None else None,
+    )
