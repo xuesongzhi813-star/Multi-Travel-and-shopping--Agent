@@ -16,7 +16,7 @@ from psycopg_pool import AsyncConnectionPool
 from sqlalchemy.exc import DBAPIError, TimeoutError as DatabasePoolTimeout
 
 from customer_support_chat.app.business.database import DatabaseSettings, local_value, validate_schema
-from .parent_graph import GraphResult, MessageLoader, build_parent_graph
+from .parent_graph import FlightLookup, GraphResult, HotelSearch, MessageLoader, build_parent_graph
 
 
 class GraphUnavailable(RuntimeError):
@@ -81,10 +81,17 @@ async def prepare_checkpoints(settings: DatabaseSettings, schema: str) -> None:
 
 
 class GraphRuntime:
-    def __init__(self, saver: AsyncPostgresSaver, load_message: MessageLoader):
+    def __init__(
+        self, saver: AsyncPostgresSaver, load_message: MessageLoader, *,
+        flight_lookup: FlightLookup | None = None, hotel_search: HotelSearch | None = None,
+    ):
         self.saver = saver
         self.load_message = load_message
-        self.graph: CompiledStateGraph = build_parent_graph(load_message, saver)
+        self.flight_lookup = flight_lookup
+        self.hotel_search = hotel_search
+        self.graph: CompiledStateGraph = build_parent_graph(
+            load_message, saver, flight_lookup=flight_lookup, hotel_search=hotel_search,
+        )
 
     async def read(self, thread_id: UUID) -> GraphResult | None:
         try:
@@ -99,7 +106,9 @@ class GraphRuntime:
     ) -> GraphResult:
         if connection is not None:
             saver = AsyncPostgresSaver(connection, serde=CheckpointJsonSerializer())
-            runtime = GraphRuntime(saver, self.load_message)
+            runtime = GraphRuntime(
+                saver, self.load_message, flight_lookup=self.flight_lookup, hotel_search=self.hotel_search,
+            )
             return await runtime._invoke(user_id, thread_id, message_id)
         return await self._invoke(user_id, thread_id, message_id)
 
@@ -124,7 +133,8 @@ class GraphRuntime:
 
 @asynccontextmanager
 async def open_graph_runtime(
-    settings: DatabaseSettings, schema: str, load_message: MessageLoader,
+    settings: DatabaseSettings, schema: str, load_message: MessageLoader, *,
+    flight_lookup: FlightLookup | None = None, hotel_search: HotelSearch | None = None,
 ) -> AsyncIterator[GraphRuntime]:
     pool = AsyncConnectionPool(
         kwargs=checkpoint_kwargs(settings, schema), open=False,
@@ -132,4 +142,4 @@ async def open_graph_runtime(
     )
     async with pool:
         saver = AsyncPostgresSaver(pool, serde=CheckpointJsonSerializer())
-        yield GraphRuntime(saver, load_message)
+        yield GraphRuntime(saver, load_message, flight_lookup=flight_lookup, hotel_search=hotel_search)

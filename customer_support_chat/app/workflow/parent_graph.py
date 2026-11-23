@@ -1,7 +1,7 @@
 """Route authenticated parent-graph turns without model dependencies."""
 
 from collections.abc import Awaitable, Callable
-from typing import Literal, TypedDict
+from typing import Literal, NotRequired, TypedDict
 from unicodedata import normalize
 from uuid import UUID
 
@@ -10,10 +10,20 @@ from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
+from customer_support_chat.app.tooling.executor import valid_tool_call_id
+from .hotel_handoff import (
+    HotelPending, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival,
+    resolve_hotel_turn, stay_checkout,
+)
+
 
 GuardDecision = Literal["allow", "reject"]
 MessageLoader = Callable[[UUID, UUID, UUID], Awaitable[str | None]]
 GuardEvaluator = Callable[[str], Awaitable[GuardDecision]]
+FlightLookup = Callable[[UUID, UUID, str], Awaitable[VerifiedArrival | None]]
+HotelSearch = Callable[[UUID, UUID, HotelQuery], Awaitable[HotelRoleResult]]
+TurnStatus = Literal["recorded", "rejected", "needs_clarification", "hotel_results", "no_availability", "unavailable"]
+RETRY_HOTEL = "暂时无法完成酒店查询，请重新发送包含航班和晚数的完整请求。"
 REFUSAL_MESSAGE = "这条消息无法处理，请改问你自己的旅行安排。"
 REJECT_PHRASES = (
     "忽略系统规则",
@@ -27,7 +37,9 @@ REJECT_PHRASES = (
 
 class GraphResult(TypedDict):
     message_id: str
-    status: Literal["recorded", "rejected"]
+    status: TurnStatus
+    reply: NotRequired[str]
+    hotel_options: NotRequired[list[dict]]
     turn_count: int
 
 
@@ -37,6 +49,8 @@ class GraphState(TypedDict, total=False):
     prior_turn_count: int
     decision: GuardDecision
     completed: GraphResult
+    hotel_pending: HotelPending | None
+    hotel_arrival: dict[str, str] | None
 
 
 async def evaluate_input(content: str) -> GuardDecision:
@@ -49,6 +63,8 @@ def build_parent_graph(
     checkpointer: BaseCheckpointSaver,
     *,
     decide: GuardEvaluator = evaluate_input,
+    flight_lookup: FlightLookup | None = None,
+    hotel_search: HotelSearch | None = None,
 ) -> CompiledStateGraph:
     async def check_input(state: GraphState, config: RunnableConfig) -> GraphState:
         content = await load_message(
@@ -60,19 +76,88 @@ def build_parent_graph(
             raise LookupError("Owned graph input is missing")
         return {"decision": await decide(content)}
 
-    def complete(state: GraphState, status: Literal["recorded", "rejected"]) -> GraphState:
-        return {"completed": {
+    def complete(state: GraphState, status: TurnStatus, reply: str | None = None) -> GraphState:
+        result: GraphResult = {
             "message_id": state["message_id"],
             "status": status,
             "turn_count": state["prior_turn_count"] + 1,
-        }}
+        }
+        if reply is not None:
+            result["reply"] = reply
+        return {"completed": result}
+
+    async def allow(state: GraphState, config: RunnableConfig) -> GraphState:
+        if flight_lookup is None or hotel_search is None:
+            return complete(state, "recorded")
+        user = UUID(state["user_id"])
+        thread = UUID(config["configurable"]["thread_id"])
+        content = await load_message(user, thread, UUID(state["message_id"]))
+        if content is None:
+            raise LookupError("Owned graph input is missing")
+        turn = resolve_hotel_turn(content, state.get("hotel_pending"))
+        if turn.action == "ordinary":
+            return complete(state, "recorded")
+        if turn.action == "cancel":
+            return complete(state, "recorded", "已取消酒店查询。") | {"hotel_pending": None, "hotel_arrival": None}
+        pending = turn.request
+        assert pending is not None
+        reference = pending.get("reference")
+        if not reference:
+            return complete(state, "needs_clarification", "请提供一个本人航班编号。") | {
+                "hotel_pending": pending | {"waiting": "reference"},
+                "hotel_arrival": None,
+            }
+
+        try:
+            arrival = await flight_lookup(user, thread, reference)
+            if arrival is None or arrival.reference != reference or not valid_tool_call_id(arrival.tool_call_id):
+                return complete(state, "unavailable", "无法核验该航班，请检查本人航班编号。") | {
+                    "hotel_pending": None,
+                    "hotel_arrival": None,
+                }
+            if (arrival.airport, arrival.city, arrival.timezone) != ("ZRH", "Zürich", "Europe/Zurich"):
+                return complete(state, "unavailable", "到达城市暂无演示酒店库存。") | {"hotel_pending": None, "hotel_arrival": None}
+            arrival_date = arrival.local_date.isoformat()
+            if pending.get("arrival_date", arrival_date) != arrival_date:
+                raise RoleUnavailable()
+            provenance = {
+                "reference": arrival.reference, "city": arrival.city, "airport": arrival.airport,
+                "local_date": arrival_date, "timezone": arrival.timezone, "tool_call_id": arrival.tool_call_id,
+            }
+            check_out = stay_checkout(arrival.local_date, pending)
+            if check_out is None:
+                reply = "您打算住几晚？"
+                if pending.get("nights") is not None or pending.get("check_out") is not None:
+                    reply = "请确认住宿晚数（1–14 晚）或有效的退房日期。"
+                return complete(state, "needs_clarification", reply) | {
+                    "hotel_pending": pending | {"waiting": "nights", "arrival_date": arrival_date},
+                    "hotel_arrival": provenance,
+                }
+            result = await hotel_search(user, thread, HotelQuery(
+                arrival.city, arrival.timezone, arrival.local_date, check_out,
+                pending.get("area"), pending.get("room_type"),
+            ))
+        except RoleUnavailable:
+            return complete(state, "unavailable", RETRY_HOTEL) | {"hotel_pending": None, "hotel_arrival": None}
+
+        reply = {
+            "hotel_results": "以下是整段住宿均有库存的演示酒店。",
+            "no_availability": "没有符合整段住宿条件的演示库存。",
+            "unavailable": RETRY_HOTEL,
+        }[result.status]
+        update = complete(state, result.status, reply)
+        if result.status == "hotel_results":
+            update["completed"]["hotel_options"] = [option.to_json() for option in result.options]
+        update["hotel_pending"] = None
+        update["hotel_arrival"] = provenance
+        return update
 
     def route(state: GraphState) -> GuardDecision:
         return state["decision"]
 
     builder = StateGraph(GraphState)
     builder.add_node("check_input", check_input)
-    builder.add_node("allow", lambda state: complete(state, "recorded"))
+    builder.add_node("allow", allow)
     builder.add_node("reject", lambda state: complete(state, "rejected"))
     builder.add_edge(START, "check_input")
     builder.add_conditional_edges("check_input", route, {"allow": "allow", "reject": "reject"})
