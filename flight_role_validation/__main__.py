@@ -16,6 +16,7 @@ from sqlalchemy.schema import DropSchema
 from customer_support_chat.app.business.database import create_engine, migrate_business, read_settings
 from customer_support_chat.app.business.demo_seed import DEMO_USERS, FLIGHTS, seed_demo
 from customer_support_chat.app.business.repository import BusinessRepository
+from customer_support_chat.app.tooling.audit import PostgresAuditSink
 from .executor import FlightFacts, build_repository_lookup
 from .fixture_model import ScriptedFlightModel, synthetic_replies
 from .live import MODEL_NAME, open_live_model
@@ -85,6 +86,7 @@ async def run_live_validation() -> int:
                 try:
                     result = await run_flight_role(
                         SYNTHETIC_INPUT, model=model, lookup=build_repository_lookup(repository),
+                        audit_sink=PostgresAuditSink(repository.engine, repository.db.users.schema),
                     )
                     report["result"] = asdict(result)
                     handoff = result.handoff

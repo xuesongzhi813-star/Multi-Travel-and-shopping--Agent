@@ -1,12 +1,16 @@
 """Bind the only flight lookup to the host's authenticated user."""
 
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import datetime
 import re
+from typing import Annotated
 from uuid import UUID
 
+from pydantic import BaseModel, ConfigDict, Field
+
 from customer_support_chat.app.business.repository import BusinessRepository
+from customer_support_chat.app.tooling.executor import ToolDefinition, ToolRegistry
 
 
 FLIGHT_REFERENCE = r"DEMO-[A-Z][0-9]{1,3}"
@@ -37,6 +41,31 @@ def build_repository_lookup(repository: BusinessRepository) -> FlightLookup:
         return None
 
     return find
+
+
+class LookupArguments(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    reference: Annotated[str, Field(pattern=f"^{FLIGHT_REFERENCE}$")]
+
+
+class FlightToolData(BaseModel):
+    reference: str
+    arrival_airport: str
+    arrival_at_utc: datetime
+    arrival_timezone: str
+
+
+def register_flight_tool(registry: ToolRegistry, lookup: FlightLookup) -> None:
+    async def handle(context, arguments, tool_call_id):
+        facts = await lookup(context.user_id, arguments.reference)
+        if facts is None or facts.reference != arguments.reference:
+            return None
+        return asdict(facts)
+
+    registry.register(ToolDefinition(
+        "lookup_flight", "Read the authenticated user's synthetic flight by reference",
+        LookupArguments, FlightToolData, "builtin", frozenset({"flight"}), handle,
+    ))
 
 
 class FlightExecutor:

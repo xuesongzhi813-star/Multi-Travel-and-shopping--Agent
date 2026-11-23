@@ -6,7 +6,7 @@ from datetime import date
 import json
 import re
 from typing import Annotated, Literal
-from uuid import UUID
+from uuid import UUID, uuid4
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from langchain.agents import create_agent
@@ -18,10 +18,9 @@ from langchain.tools import ToolRuntime, tool
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from openai import APIError, APITimeoutError
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
-from sqlalchemy.exc import SQLAlchemyError
-
-from .executor import FLIGHT_REFERENCE, FlightExecutor, FlightLookup
+from pydantic import Field, ValidationError
+from customer_support_chat.app.tooling.executor import AuditSink, ToolContext, ToolExecutor, ToolRegistry
+from .executor import FLIGHT_REFERENCE, FlightLookup, FlightToolData, LookupArguments, register_flight_tool
 
 
 MODEL_REQUEST_LIMIT = 3
@@ -42,9 +41,16 @@ class ModelRequestBudgetExceeded(RuntimeError):
     """A model request was prevented before reaching the provider."""
 
 
-class LookupArguments(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-    reference: Annotated[str, Field(pattern=f"^{FLIGHT_REFERENCE}$")]
+class FlightDataUnavailable(RuntimeError):
+    """The flight lookup failed within the unified executor."""
+
+
+class InMemoryAudit:
+    def __init__(self) -> None:
+        self.records = []
+
+    async def write(self, record) -> None:
+        self.records.append(record)
 
 
 class HandoffCandidate(LookupArguments):
@@ -74,26 +80,43 @@ class FlightRoleResult:
     handoff: FlightHandoff | None = None
 
 
-@after_model
-def validate_model_response(state, runtime):
-    message = next((item for item in reversed(state["messages"]) if isinstance(item, AIMessage)), None)
-    if message is None or message.invalid_tool_calls or len(message.tool_calls) != 1:
-        raise FlightProtocolError("Expected one valid tool call")
-    call = message.tool_calls[0]
-    if call["name"] not in {"lookup_flight", "HandoffCandidate"} or not call.get("id"):
-        raise FlightProtocolError("Unexpected model tool")
-    LookupArguments.model_validate(call["args"])
-    return None
-
-
 async def run_flight_role(
     input: FlightRoleInput, *, model: BaseChatModel, lookup: FlightLookup, timeout: float = 40,
+    context: ToolContext | None = None, audit_sink: AuditSink | None = None,
 ) -> FlightRoleResult:
     target = input.target_reference
     if target is None or re.fullmatch(FLIGHT_REFERENCE, target) is None:
         return FlightRoleResult("needs_clarification", reason="target_required")
 
-    executor = FlightExecutor(input.user_id, lookup)
+    context = context if context is not None else ToolContext(input.user_id, "flight", uuid4())
+    if context.user_id != input.user_id or context.role != "flight":
+        return FlightRoleResult("unavailable", reason="protocol_error")
+
+    registry = ToolRegistry()
+    register_flight_tool(registry, lookup)
+    executor = ToolExecutor(registry, audit_sink if audit_sink is not None else InMemoryAudit())
+    evidence: dict[str, tuple[FlightToolData, str]] = {}
+
+    @after_model
+    async def validate_model_response(state, runtime):
+        message = next((item for item in reversed(state["messages"]) if isinstance(item, AIMessage)), None)
+        if message is None or message.invalid_tool_calls or len(message.tool_calls) != 1:
+            raise FlightProtocolError("Expected one valid tool call")
+        call = message.tool_calls[0]
+        call_id = call.get("id")
+        if not call_id:
+            raise FlightProtocolError("Missing model tool call identifier")
+        if call["name"] == "HandoffCandidate":
+            LookupArguments.model_validate(call["args"])
+            return None
+        try:
+            if call["name"] != "lookup_flight":
+                raise FlightProtocolError("Unexpected model tool")
+            LookupArguments.model_validate(call["args"])
+        except (FlightProtocolError, ValidationError) as error:
+            await executor.execute(context, call["name"], call["args"], call_id)
+            raise FlightProtocolError("Rejected model tool call") from error
+        return None
 
     @tool
     async def lookup_flight(
@@ -102,15 +125,15 @@ async def run_flight_role(
         """Read the authenticated user's synthetic flight by reference."""
         if not runtime.tool_call_id:
             raise FlightProtocolError("Lookup requires a tool call identifier")
-        facts = await executor.lookup_flight(reference, runtime.tool_call_id)
-        if facts is None:
+        result = await executor.execute(context, "lookup_flight", {"reference": reference}, runtime.tool_call_id)
+        if result.status == "not_found":
             return '{"status":"not_found"}'
-        return json.dumps({
-            "reference": facts.reference,
-            "arrival_airport": facts.arrival_airport,
-            "arrival_at_utc": facts.arrival_at_utc.isoformat(),
-            "arrival_timezone": facts.arrival_timezone,
-        })
+        if result.status == "timeout":
+            raise TimeoutError("Flight tool timed out")
+        if result.status != "ok":
+            raise FlightDataUnavailable("Flight tool failed")
+        evidence[reference] = (FlightToolData.model_validate(result.data), result.tool_call_id)
+        return json.dumps(result.data, ensure_ascii=False)
 
     # Explicitly prevent platform tracing from turning these role inputs into external calls.
     from langsmith import tracing_context
@@ -138,15 +161,15 @@ async def run_flight_role(
         return FlightRoleResult("unavailable", reason="protocol_error")
     except APIError:
         return FlightRoleResult("unavailable", reason="provider_error")
-    except SQLAlchemyError:
+    except FlightDataUnavailable:
         return FlightRoleResult("unavailable", reason="flight_data_unavailable")
 
     candidate = result.get("structured_response")
-    evidence = executor.evidence(target)
-    if not isinstance(candidate, HandoffCandidate) or candidate.reference != target or evidence is None:
+    verified = evidence.get(target)
+    if not isinstance(candidate, HandoffCandidate) or candidate.reference != target or verified is None:
         return FlightRoleResult("unavailable", reason="unverified_evidence")
 
-    facts = evidence.facts
+    facts, tool_call_id = verified
     if facts.arrival_at_utc.utcoffset() is None:
         return FlightRoleResult("unavailable", reason="unverified_evidence")
     try:
@@ -155,5 +178,5 @@ async def run_flight_role(
         return FlightRoleResult("unavailable", reason="unverified_evidence")
 
     return FlightRoleResult("verified", handoff=FlightHandoff(
-        target, facts.arrival_airport, arrival_date, facts.arrival_timezone, evidence.tool_call_id,
+        target, facts.arrival_airport, arrival_date, facts.arrival_timezone, tool_call_id,
     ))
