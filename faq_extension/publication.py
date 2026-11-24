@@ -1,6 +1,6 @@
 """Build, verify and read project-scoped Qdrant FAQ evidence collections."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import re
 from uuid import NAMESPACE_URL, UUID, uuid4, uuid5
 
@@ -91,22 +91,44 @@ class FaqPublisher:
         seen_offsets = set()
         while True:
             result = self._call("POST", path, json=body)
-            try:
-                for point in result["points"]:
-                    identifier, payload = point["id"], point["payload"]
-                    if identifier in points or not isinstance(payload, dict):
-                        raise PublicationError("Unexpected or repeated evidence payload")
-                    points[identifier] = {"id": identifier, "payload": payload}
-                next_page = result["next_page_offset"]
-            except (KeyError, TypeError) as error:
-                raise PublicationError("Malformed evidence result") from error
+            if not isinstance(result, dict) or not isinstance(result.get("points"), list):
+                raise PublicationError("Malformed evidence result")
+            for point in result["points"]:
+                if not isinstance(point, dict) or not isinstance(point.get("payload"), dict):
+                    raise PublicationError("Malformed evidence point")
+                identifier = self._point_id(point.get("id"))
+                if identifier in points:
+                    raise PublicationError("Repeated evidence point")
+                points[identifier] = {"id": identifier, "payload": point["payload"]}
+            if "next_page_offset" not in result:
+                raise PublicationError("Missing evidence pagination offset")
+            next_page = result["next_page_offset"]
             if next_page is None:
                 break
+            next_page = self._point_id(next_page)
             if next_page in seen_offsets:
                 raise PublicationError("Evidence pagination did not advance")
             seen_offsets.add(next_page)
             body["offset"] = next_page
         return [points[key] for key in sorted(points)]
+
+    @staticmethod
+    def _point_id(value: object) -> str:
+        if isinstance(value, str):
+            try:
+                if str(UUID(value)) == value:
+                    return value
+            except ValueError as error:
+                raise PublicationError("Invalid evidence point identifier") from error
+        raise PublicationError("Invalid evidence point identifier")
+
+    def _verify_sample(self, name: str, points: list[dict]) -> None:
+        if not points:
+            raise PublicationError("Evidence build contains no points")
+        document_id = points[0]["payload"]["document_id"]
+        expected = [point for point in points if point["payload"]["document_id"] == document_id]
+        if digest_json(self._read(name, document_id=document_id)) != digest_json(expected):
+            raise PublicationError("Filtered evidence did not match the verified build")
 
     def build(self, version_id: str) -> FaqBuild:
         version = self.catalog.read_version(version_id)
@@ -123,8 +145,9 @@ class FaqPublisher:
                            json={"field_name": field_name, "field_schema": "keyword"})
             self._upload(name, points)
             observed = self._read(name)
-            if observed != points:
+            if digest_json(observed) != digest_json(points):
                 raise PublicationError("Evidence build did not match canonical FAQ")
+            self._verify_sample(name, points)
         except PublicationError:
             self.catalog.finish_build(build_id, verified=False, point_count=0, payload_digest=None)
             raise
@@ -138,6 +161,7 @@ class FaqPublisher:
         points = self._read(build.collection)
         if len(points) != build.point_count or digest_json(points) != build.payload_digest:
             raise PublicationError("Evidence build no longer matches verification")
+        self._verify_sample(build.collection, points)
         return self.catalog.activate(build_id, expected_revision=expected_revision, rollback=rollback)
 
     def evidence(self, document_id: str) -> FaqEvidence | None:
@@ -145,17 +169,13 @@ class FaqPublisher:
         pointer = self.catalog.active()
         if pointer.build_id is None or pointer.version_id is None or pointer.collection is None:
             raise FaqNotPublished()
-        points = self._read(pointer.collection, document_id=document_id)
-        if not points:
+        version = self.catalog.read_version(pointer.version_id)
+        document = next((item for item in version.documents if item.id == document_id), None)
+        if document is None:
             return None
-        try:
-            chunks = tuple(sorted((item["payload"] for item in points), key=lambda item: item["chunk_index"]))
-            if any(
-                chunk["document_id"] != document_id or chunk["version_id"] != pointer.version_id
-                or chunk["chunk_count"] != len(chunks) or chunk["chunk_index"] != index
-                for index, chunk in enumerate(chunks)
-            ):
-                raise PublicationError("Evidence does not match the published snapshot")
-        except (KeyError, TypeError) as error:
-            raise PublicationError("Malformed document evidence") from error
+        expected = self._points(replace(version, documents=(document,)))
+        points = self._read(pointer.collection, document_id=document_id)
+        if digest_json(points) != digest_json(expected):
+            raise PublicationError("Evidence does not match the published document")
+        chunks = tuple(sorted((point["payload"] for point in points), key=lambda item: item["chunk_index"]))
         return FaqEvidence(pointer.revision, pointer.version_id, pointer.build_id, document_id, chunks)

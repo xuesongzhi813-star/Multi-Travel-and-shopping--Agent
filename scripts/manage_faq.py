@@ -19,8 +19,14 @@ from faq_extension.mysql_catalog import CatalogConflict, CatalogNotFound, MySqlF
 from faq_extension.publication import FaqNotPublished, FaqPublisher, PublicationError
 
 
+class JsonArgumentParser(argparse.ArgumentParser):
+    def error(self, message: str) -> None:
+        print(json.dumps({"status": "invalid_request_or_conflict"}))
+        self.exit(2)
+
+
 def parser() -> argparse.ArgumentParser:
-    cli = argparse.ArgumentParser(description=__doc__)
+    cli = JsonArgumentParser(description=__doc__)
     commands = cli.add_subparsers(dest="command", required=True)
     commands.add_parser("init")
     commands.add_parser("status")

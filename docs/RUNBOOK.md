@@ -63,3 +63,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-local.ps1 -Action 
 在酒店结果点「发起演示预订」。核对酒店、房型、日期和总价后，再点「确认预订」或「拒绝」。提案十分钟有效。若库存或报价变化，请在同一会话重新查询并选择。批准后以页面的演示订单号为准。如果审批中断，重新打开同一会话并点「继续处理」，服务会复用已经提交的回执。
 
 运行常规启动命令即可应用迁移 0003。离线端到端命令为 `.\.venv\Scripts\python.exe -B scripts/verify_local_e2e.py`，使用临时合成账号和 PostgreSQL schema。
+
+## P8 FAQ 与酒店目录
+
+知识发布独立于 Web 进程。启动本机 MySQL 专用项目库和 Qdrant，再在项目根目录执行。
+
+```powershell
+& ./.venv/Scripts/python.exe -B scripts/manage_faq.py init
+& ./.venv/Scripts/python.exe -B scripts/manage_faq.py import faq_extension/data/travel_faq_zh.json
+& ./.venv/Scripts/python.exe -B scripts/manage_faq.py build travel-zh-2026-11-24
+& ./.venv/Scripts/python.exe -B scripts/manage_faq.py status
+```
+
+构建输出 `build_id`，状态输出 `revision`。确认构建为 `verified` 后，使用自己的 ID 和刚读取的修订号执行 `activate <build_id> --expected-revision <revision>`。初次发布前修订号是 0。用 `evidence bag-report` 读回当前版本的引用和切片。返回 `not_published` 或 `not_found` 时分别表示无活跃版本或该版没有该文档。已登记文档的证据缺失或发生变化时返回 `storage_unavailable`，退出码为 1。
+
+构建失败时，原版本继续可查。恢复到先前发布的构建请使用 `rollback <build_id> --expected-revision <revision>`。修订号冲突时先读状态并核对，确定目标后再提交。构建、激活和回退不会自动删除集合。P8 通过文档 ID 读取 Qdrant 证据。向量、混检、精排和聊天 FAQ 将由 P9 接入。
+
+正常启动会应用迁移 0004 并补齐酒店目录。从 demo-a 会话发送「找 DEMO-A3 落地后的机场酒店，住 2 晚」，可查看 2026-12-20 至 22 日的演示房源和旅游局来源。再次启动只补缺库存，保留已预订扣减。

@@ -296,6 +296,19 @@ def run(live):
             print("PASS P6 hotel handoff after restart, local date, account isolation, audit and read-only repeat",
                   flush=True)
             verify_booking(client, hotel_path, repeated, password_b)
+            new_thread = require(client.post("/api/threads"), 201).json()["thread_id"]
+            newer_path = f"/api/threads/{new_thread}/messages"
+            recommendations = require(client.post(newer_path, json={
+                "content": "找 DEMO-A3 落地后的机场酒店，住 2 晚",
+            }), 201).json()
+            assert recommendations["status"] == "hotel_results", recommendations["status"]
+            options = {item["hotel_id"]: item for item in recommendations["hotel_options"]}
+            assert "zurich-kameha" in options and "zurich-hyatt" not in options
+            for option in options.values():
+                assert option["check_in"] == "2026-12-20" and option["check_out"] == "2026-12-22"
+                assert option["demo"] is True and option["checked_on"] == "2026-11-24"
+                assert option["source_url"].startswith("https://www.zuerich.com/en/accommodation/")
+            print("PASS P8 sourced hotel options on formal HTTP, multi-night dates and sold-out filtering", flush=True)
         with server(free_port(), dict(env, REDIS_PORT=str(free_port())), launcher=False) as client:
             health = require(client.get("/health/ready"), 200).json()
             assert health["status"] == "degraded" and health["dependencies"]["redis"] is False
