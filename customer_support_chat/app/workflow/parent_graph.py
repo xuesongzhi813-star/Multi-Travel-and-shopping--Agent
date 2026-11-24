@@ -116,7 +116,7 @@ def build_parent_graph(
             update = None
         policy = (
             await faq_search(faq_turn.question) if faq_turn.question is not None
-            else FaqSearchResult(status="rephrase")
+            else FaqSearchResult(status=faq_turn.local_status)
         )
         return with_faq(update or complete(state, "faq", faq_reply(policy)), policy)
 

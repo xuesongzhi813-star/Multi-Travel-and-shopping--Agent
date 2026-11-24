@@ -1,15 +1,21 @@
 from contextlib import AsyncExitStack
+import socket
 import unittest
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock, patch
 from uuid import uuid4
 
 import httpx
 from sqlalchemy.schema import DropSchema
 
+from customer_support_chat.app.business.database import local_value
 from customer_support_chat.app.business.demo_seed import seed_demo
 from customer_support_chat.app.workflow.checkpoints import prepare_checkpoints
 from faq_extension.contracts import FaqSearchResult
-from scripts.verify_faq_siliconflow import RequestBudgetTransport
+from faq_extension.catalog import load_faq_version
+from faq_extension.mysql_catalog import MySqlFaqSettings
+from faq_extension.publication import FaqPublisher
+from faq_extension.siliconflow import FaqProviderError, RankedIndex
+from scripts.verify_faq_siliconflow import SOURCE, RequestBudgetTransport, temporary_catalog
 import test_business_migrations
 from test_business_seed import PASSWORDS
 from test_faq_graph import evidence
@@ -90,6 +96,53 @@ class FaqApiTests(test_business_migrations.BusinessDatabaseTest):
         self.assertEqual(blocked.status_code, 409)
         self.search.assert_not_awaited()
 
+
+    async def test_production_search_returns_citations_with_redis_and_reranker_outages(self):
+        port = local_value("QDRANT_PORT", "6333")
+        with (
+            httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=8, trust_env=False) as qdrant,
+            temporary_catalog(qdrant, MySqlFaqSettings.read()) as (catalog, prefix),
+            socket.socket() as unused,
+        ):
+            unused.bind(("127.0.0.1", 0))
+            vector = [1.0] + [0.0] * 1023
+            version = load_faq_version(SOURCE)
+            catalog.import_version(version)
+            publisher = FaqPublisher(catalog, qdrant, collection_prefix=prefix,
+                                     embedder=lambda texts: [vector for _ in texts])
+            build = publisher.build(version.version_id, hybrid=True)
+            publisher.activate(build.build_id, expected_revision=0)
+            provider = Mock()
+            provider.async_embed = AsyncMock(return_value=vector)
+            provider.rerank = AsyncMock(return_value=[RankedIndex(0, 0.9)])
+            settings = {
+                "TRAVEL_FAQ_MODE": "siliconflow", "SILICONFLOW_API_KEY": "synthetic-fixture-token",
+                "REDIS_PORT": str(unused.getsockname()[1]),
+            }
+
+            def fixture_value(name, default=""):
+                return settings[name] if name in settings else local_value(name, default)
+
+            with (
+                patch("web_app.app.runtime.MySqlFaqCatalog", return_value=catalog),
+                patch("web_app.app.runtime.SiliconFlowFaqClient", return_value=provider),
+                patch("web_app.app.runtime.local_value", side_effect=fixture_value),
+            ):
+                production = create_app(self.settings, checkpoint_schema=self.checkpoints)
+                async with (
+                    production.router.lifespan_context(production),
+                    httpx.AsyncClient(transport=httpx.ASGITransport(app=production),
+                                      base_url="http://127.0.0.1", cookies=self.client.cookies) as http,
+                ):
+                    for degraded in (False, True):
+                        if degraded:
+                            provider.rerank.side_effect = FaqProviderError("timeout")
+                        response = await http.post(self.path + "/messages", json={"content": "行李延误怎么办？"})
+                        self.assertEqual(response.status_code, 201)
+                        faq = response.json()["faq"]
+                        self.assertEqual(faq["status"], "ok")
+                        self.assertTrue(faq["citations"][0]["document_id"].startswith("bag-"))
+                        self.assertEqual(faq["degradation"], "reranker_timeout" if degraded else None)
 
 class FaqRequestBudgetTests(unittest.IsolatedAsyncioTestCase):
     async def test_eleventh_request_is_rejected_without_retry_or_redirect(self):

@@ -21,6 +21,15 @@ FAQ_TOKENIZER = "multilingual"
 HYBRID_PROFILE = FaqIndexProfile("hybrid", EMBEDDING_MODEL, EMBEDDING_DIMENSIONS, FAQ_TOKENIZER)
 
 
+def _valid_dense(vector: object) -> bool:
+    if not isinstance(vector, list) or len(vector) != EMBEDDING_DIMENSIONS:
+        return False
+    try:
+        return all(type(number) in (float, int) and math.isfinite(number) for number in vector) and any(vector)
+    except OverflowError:
+        return False
+
+
 class PublicationError(RuntimeError):
     """Qdrant did not produce valid evidence."""
 
@@ -93,9 +102,9 @@ class FaqPublisher:
             if not isinstance(result, dict) or result.get("status") != "completed":
                 raise PublicationError("Evidence write did not complete")
 
-    def _read(self, name: str, *, document_id: str | None = None) -> list[dict]:
+    def _read(self, name: str, *, document_id: str | None = None, with_dense: bool = False) -> list[dict]:
         path = self._path(name) + "/points/scroll"
-        body = {"limit": 16, "with_payload": True, "with_vector": False}
+        body = {"limit": 16, "with_payload": True, "with_vector": [FAQ_DENSE] if with_dense else False}
         if document_id is not None:
             body["filter"] = {"must": [{"key": "document_id", "match": {"value": document_id}}]}
         points = {}
@@ -107,6 +116,11 @@ class FaqPublisher:
             for point in result["points"]:
                 if not isinstance(point, dict) or not isinstance(point.get("payload"), dict):
                     raise PublicationError("Malformed evidence point")
+                if with_dense:
+                    vectors = point.get("vector")
+                    vector = vectors.get(FAQ_DENSE) if isinstance(vectors, dict) else None
+                    if not _valid_dense(vector):
+                        raise PublicationError("Hybrid FAQ point is missing a usable dense vector")
                 identifier = self._point_id(point.get("id"))
                 if identifier in points:
                     raise PublicationError("Repeated evidence point")
@@ -163,9 +177,7 @@ class FaqPublisher:
             if not isinstance(vectors, list) or len(vectors) != len(batch):
                 raise PublicationError("Hybrid FAQ embedding count mismatch")
             for point, vector in zip(batch, vectors, strict=True):
-                if (not isinstance(vector, list) or len(vector) != EMBEDDING_DIMENSIONS
-                        or any(type(number) not in (float, int) or not math.isfinite(number) for number in vector)
-                        or not any(vector)):
+                if not _valid_dense(vector):
                     raise PublicationError("Invalid hybrid FAQ vector")
                 indexed.append(point | {"vector": {FAQ_DENSE: vector}})
         return indexed
@@ -229,7 +241,7 @@ class FaqPublisher:
                 })
                 points = self._searchable(points)
             self._upload(name, self._embed(points) if hybrid else points)
-            observed = self._read(name)
+            observed = self._read(name, with_dense=True) if hybrid else self._read(name)
             if digest_json(observed) != digest_json(points):
                 raise PublicationError("Evidence build did not match canonical FAQ")
             self._verify_sample(name, points)
@@ -245,7 +257,10 @@ class FaqPublisher:
         build = self.catalog.get_build(build_id)
         if build.status != "verified":
             raise CatalogConflict("FAQ build is not verified")
-        points = self._read(build.collection)
+        points = (
+            self._read(build.collection, with_dense=True) if build.profile.kind == "hybrid"
+            else self._read(build.collection)
+        )
         if len(points) != build.point_count or digest_json(points) != build.payload_digest:
             raise PublicationError("Evidence build no longer matches verification")
         self._verify_sample(build.collection, points)

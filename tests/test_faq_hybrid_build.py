@@ -88,3 +88,16 @@ class FaqHybridBuildTests(MySqlFixture):
         with self.assertRaises(PublicationError):
             self.publisher.activate(build.build_id, expected_revision=0)
         self.assertEqual(self.catalog.active().revision, 0)
+
+
+    def test_activation_rejects_missing_dense_vector_outside_sample(self):
+        build = self.publisher.build(self.release.version_id, hybrid=True)
+        points = self.publisher._read(build.collection)
+        point_id = points[-1]["id"]
+        self.client.post(
+            f"/collections/{build.collection}/points/vectors/delete",
+            params={"wait": "true"}, json={"points": [point_id], "vector": ["dense"]},
+        ).raise_for_status()
+        with self.assertRaises(PublicationError):
+            self.publisher.activate(build.build_id, expected_revision=0)
+        self.assertEqual(self.catalog.active().revision, 0)

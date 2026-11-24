@@ -116,3 +116,19 @@ class FaqGraphTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ZRH", classify_faq_turn("如何核实 ZRH 酒店设施？").question.text)
         for text in ("不要机场酒店，住两晚", "不用查行李延误政策", "找 DEMO-A1 的酒店住 2 晚"):
             self.assertEqual(classify_faq_turn(text).kind, "ordinary", text)
+
+
+    async def test_joined_mixed_request_preserves_stay_and_policy_scope(self):
+        graph = self.graph(faq_search=self.search)
+        mixed = await self.turn(graph, "找 DEMO-A1 的酒店住 1 晚并问行李延误怎么办")
+        self.assertEqual(mixed["completed"]["status"], "no_availability")
+        self.assertEqual(mixed["completed"]["faq"]["status"], "ok")
+        self.hotel.assert_awaited_once()
+        self.search.reset_mock()
+        for message in ("国航航班延误怎么办", "SWISS 航班延误怎么办"):
+            outcome = await self.turn(graph, message)
+            self.assertEqual(outcome["completed"]["faq"]["status"], "no_evidence")
+        self.search.assert_not_awaited()
+        refund = classify_faq_turn("SWISS 航班取消后没有合适的替代航班，在哪里看退款选项？")
+        self.assertIn("没有合适的替代航班", refund.question.text)
+        self.assertIn("退款选项", refund.question.text)

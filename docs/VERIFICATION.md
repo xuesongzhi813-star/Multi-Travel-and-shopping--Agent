@@ -52,4 +52,4 @@ E2E 仅移除该次运行创建的随机 schema。既有数据、历史工作区
 - 混检发布和检索测试使用本机 MySQL、Qdrant、Redis 以及确定性嵌入和精排替身。覆盖中文 BM25、双路 Top-100、RRF k=60、版本和过滤一致、失败回退与缓存版本隔离。
 - 角色桥接使用 Windows 实际子进程、本机 MCP 和 PostgreSQL。验证航班和酒店各自在需要时请求一次公共 FAQ，拒绝改写和重复帧，保留航班、酒店及审批语义。
 - 正式 HTTP 验收由 scripts/verify_local_e2e.py 覆盖。离线模式不会发起付费模型调用。Chrome 浏览器检查引用、适用条件、精排降级、纯文本渲染、切换清空和重新打开会话恢复。
-- 真实硅基流动验收单独运行 scripts/verify_faq_siliconflow.py。该验收的本地凭据、服务状态与指标以实际运行记录为准。
+- 真实硅基流动验收单独运行 scripts/verify_faq_siliconflow.py。真实验收共 10 次 HTTP 200 请求。首轮通过中文同义问法和无答案，退款样本在补齐适用条件后复验通过，首条引用为 refund-after-cancel。两轮无重试，使用临时表与集合。

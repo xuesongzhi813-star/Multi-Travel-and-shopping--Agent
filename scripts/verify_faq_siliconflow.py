@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from customer_support_chat.app.business.database import local_value
+from customer_support_chat.app.workflow.faq_turn import classify_faq_turn
 from faq_extension.catalog import load_faq_version
 from faq_extension.contracts import PublicFaqQuestion
 from faq_extension.mysql_catalog import MySqlFaqCatalog, MySqlFaqSettings
@@ -88,21 +89,33 @@ def temporary_catalog(client: httpx.Client, settings: MySqlFaqSettings):
                     cursor.execute(f"DROP TABLE IF EXISTS {catalog._table(suffix)}")
 
 
-async def check_questions(base_url: str, catalog: MySqlFaqCatalog, provider: SiliconFlowFaqClient) -> dict:
+async def check_questions(
+    base_url: str, catalog: MySqlFaqCatalog, provider: SiliconFlowFaqClient, case: str,
+) -> dict:
     async with httpx.AsyncClient(base_url=base_url, timeout=8, trust_env=False) as qdrant:
         search = FaqSearchService(catalog, qdrant, provider)
         cases = (
             ("baggage_synonym", PublicFaqQuestion(text="托运行李没有收到 行李延误", category="baggage"), "bag-"),
-            ("policy_scope", PublicFaqQuestion(text="航班取消 退款 退票 SWISS", category="changes_refunds"), "refund"),
+            ("policy_scope", classify_faq_turn(
+                "SWISS 航班取消后没有合适的替代航班，在哪里查看退款选项？"
+            ).question, "refund-after-cancel"),
             ("no_answer", PublicFaqQuestion(text="月球旅馆允许带滑雪板吗"), None),
         )
         outcomes = {}
         for name, question, expected in cases:
+            if case not in ("all", name):
+                continue
             result = await search.search(question, deadline=asyncio.get_running_loop().time() + 24)
             expected_status = "no_evidence" if expected is None else "ok"
-            mapped = expected is None or any(expected in citation.document_id for citation in result.citations)
+            first = next(iter(result.citations), None)
+            if name == "policy_scope":
+                mapped = bool(first and first.document_id == expected and "SWISS 航班取消" in first.applicability
+                              and "可选的新航班不合适" in first.applicability)
+            else:
+                mapped = expected is None or any(citation.document_id.startswith(expected) for citation in result.citations)
             outcomes[name] = {
                 "status": result.status, "citations": len(result.citations),
+                "first_document_id": first.document_id if first else None,
                 "passed": result.status == expected_status and mapped and result.degradation is None,
             }
         return outcomes
@@ -111,6 +124,7 @@ async def check_questions(base_url: str, catalog: MySqlFaqCatalog, provider: Sil
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-requests", type=int, choices=range(1, MAX_REQUESTS + 1), required=True)
+    parser.add_argument("--case", choices=("all", "baggage_synonym", "policy_scope", "no_answer"), default="all")
     args = parser.parse_args(argv)
     key = local_value("SILICONFLOW_API_KEY").strip()
     if not key:
@@ -132,7 +146,7 @@ def main(argv=None) -> int:
                 publisher = FaqPublisher(catalog, client, collection_prefix=prefix, embedder=provider.embed)
                 build = publisher.build(version.version_id, hybrid=True)
                 publisher.activate(build.build_id, expected_revision=0)
-                outcomes = asyncio.run(check_questions(base_url, catalog, provider))
+                outcomes = asyncio.run(check_questions(base_url, catalog, provider, args.case))
         passed = bool(outcomes) and all(item["passed"] for item in outcomes.values())
         status = "passed" if passed else "acceptance_failed"
     except (MySQLError, PublicationError, httpx.HTTPError, OSError, ValueError, KeyError):
