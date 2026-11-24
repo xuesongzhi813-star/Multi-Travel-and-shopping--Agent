@@ -1,0 +1,245 @@
+{
+  "version_id": "travel-zh-2026-11-24",
+  "documents": [
+    {
+      "id": "bag-report",
+      "category": "baggage",
+      "language": "zh-CN",
+      "question": "到达后没拿到托运行李怎么办？",
+      "answer": "尽量在抵达时提交延误报告，可在机场行李查询处办理，也可从 SWISS 的行李异常页面进入在线申报。",
+      "applicability": "SWISS 托运行李到达后未出现。",
+      "source_url": "https://www.swiss.com/ch/en/prepare/baggage/baggage-irregularities",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "bag-track",
+      "category": "baggage",
+      "language": "zh-CN",
+      "question": "报了行李延误，如何看进度？",
+      "answer": "在行李状态入口输入报告上的参考号查询，页面也可订阅行李状态更新。",
+      "applicability": "已提交 SWISS 托运行李延误报告。",
+      "source_url": "https://www.swiss.com/ch/en/prepare/baggage/baggage-irregularities",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "bag-delivery",
+      "category": "baggage",
+      "language": "zh-CN",
+      "question": "行李找到后需要马上去机场吗？",
+      "answer": "先等通知。可根据报告中选择的方式接收送达，或在收到取件通知后去机场领取。",
+      "applicability": "SWISS 已找到先前报失的延误行李。",
+      "source_url": "https://www.swiss.com/ch/en/prepare/baggage/baggage-irregularities",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "bag-damage",
+      "category": "baggage",
+      "language": "zh-CN",
+      "question": "发现托运行李受损该找哪里？",
+      "answer": "抵达时尽快报告，可从 SWISS 行李异常页面查找受损行李申报方式。",
+      "applicability": "SWISS 托运行李在抵达后发现受损。",
+      "source_url": "https://www.swiss.com/ch/en/prepare/baggage/baggage-irregularities",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "bag-basic",
+      "category": "baggage",
+      "language": "zh-CN",
+      "question": "SWISS 欧洲航线的 Basic 或 Light 票含托运吗？",
+      "answer": "官网的欧洲航线行李表列明，经济舱 Basic 与 Light 票价不含托运行李。需要时可查看付费添加选项。",
+      "applicability": "SWISS 欧洲航线经济舱 Basic 或 Light。实际行程以预订记录为准。",
+      "source_url": "https://www.swiss.com/ch/en/prepare/baggage/checked-baggage",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "bag-comfort",
+      "category": "baggage",
+      "language": "zh-CN",
+      "question": "欧洲航线经济舱 Comfort 有多少托运行李？",
+      "answer": "SWISS 的欧洲航线行李表列出，经济舱 Comfort 包含一件托运行李，单件上限为 23 公斤。",
+      "applicability": "SWISS 欧洲航线经济舱 Comfort。其他承运方或航线需核对原票。",
+      "source_url": "https://www.swiss.com/ch/en/prepare/baggage/checked-baggage",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "cancel-notice",
+      "category": "disruptions",
+      "language": "zh-CN",
+      "question": "收到取消通知后先看哪里？",
+      "answer": "先查看 SWISS 发来的邮件，了解这张订单的安排和可用选项。需要协助时可从取消页面进入支持渠道。",
+      "applicability": "SWISS 航班取消并通知旅客后。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "cancel-recommended",
+      "category": "disruptions",
+      "language": "zh-CN",
+      "question": "航班取消后有系统推荐的替代航班吗？",
+      "answer": "打开原预订查看系统建议的替代航班。确认前核对新航班的日期和行程。",
+      "applicability": "SWISS 取消后系统已为该预订提供建议替代航班。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "cancel-compare",
+      "category": "disruptions",
+      "language": "zh-CN",
+      "question": "取消后推荐航班不合适，可以选其他航班吗？",
+      "answer": "取消后的选项页可以查看其他可用航班。是否有合适的选项取决于当时的座位供应。",
+      "applicability": "SWISS 已取消的航班且有其他可用航班。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "cancel-confirmation",
+      "category": "disruptions",
+      "language": "zh-CN",
+      "question": "确认替代航班后怎么知道新行程？",
+      "answer": "确定替代方案后，SWISS 会更新订单并发送确认邮件。请核对邮件中的新行程。",
+      "applicability": "SWISS 取消后已在原订单确认新航班。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "cancel-addons",
+      "category": "disruptions",
+      "language": "zh-CN",
+      "question": "改到替代航班后原座位和附加服务会保留吗？",
+      "answer": "SWISS 会尽量转移原有服务，但部分项目要看新航班是否可用。确认新行程后检查服务明细。",
+      "applicability": "SWISS 取消航班后转订，并且原订单含附加服务。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "cancel-special",
+      "category": "disruptions",
+      "language": "zh-CN",
+      "question": "带宠物或医疗设备，航班取消后要找谁？",
+      "answer": "如果预订涉及宠物、医疗设备或特殊协助，请联系 SWISS 服务中心处理改订。",
+      "applicability": "SWISS 已取消，原预订包含需要特别处理的行程要求。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "rebook-open",
+      "category": "changes_refunds",
+      "language": "zh-CN",
+      "question": "在哪打开 SWISS 取消后的改订入口？",
+      "answer": "可从取消页面进入原预订，使用 Travel ID 或预订参考号查看该单的可用选项。",
+      "applicability": "SWISS 航班取消。第三方渠道订单可能需要联系出票方。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "rebook-cancel-fee",
+      "category": "changes_refunds",
+      "language": "zh-CN",
+      "question": "SWISS 取消航班后换到另一可用航班收费吗？",
+      "answer": "取消页面说明，按所列选项改订另一可用航班不收改订费，原票价条件仍适用。",
+      "applicability": "仅适用于 SWISS 航班取消后按官方给出的改订选项办理。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "refund-after-cancel",
+      "category": "changes_refunds",
+      "language": "zh-CN",
+      "question": "取消后没有合适的航班，哪里看退款选项？",
+      "answer": "从取消页面进入订单选项。符合条件的订单可申请退款，能否办理以该订单显示为准。",
+      "applicability": "SWISS 航班取消，且可选的新航班不合适。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "agency-booking",
+      "category": "changes_refunds",
+      "language": "zh-CN",
+      "question": "代理商出的票，SWISS 取消后怎么处理？",
+      "answer": "先看取消通知和订单选项。部分代理或第三方平台订单不能直接在线修改，页面会提示联系相关渠道。",
+      "applicability": "SWISS 航班取消，订单由代理商或第三方平台出票。",
+      "source_url": "https://www.swiss.com/ch/en/book-and-manage/rebook/involuntary-rebooking",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "bag-expense-claim",
+      "category": "changes_refunds",
+      "language": "zh-CN",
+      "question": "行李延误买了必需品，费用从哪里申请？",
+      "answer": "先申报行李延误，再保留必要用品的付款收据，从行李异常页面提供的费用申请入口提交。",
+      "applicability": "SWISS 已申报延误的托运行李。申请资格及可退费用以官方审核为准。",
+      "source_url": "https://www.swiss.com/ch/en/prepare/baggage/baggage-irregularities",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "help-ticket-change",
+      "category": "changes_refunds",
+      "language": "zh-CN",
+      "question": "只想主动改票，能用航班取消的免费改订规则吗？",
+      "answer": "先进入自己的订单核对改订条件和可能费用。主动变更应按订单票价与出票渠道处理，可从帮助中心找对应入口。",
+      "applicability": "原航班未取消，由旅客主动申请改订。",
+      "source_url": "https://www.swiss.com/ch/en/customer-support/contact-us",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "hotel-airport-area",
+      "category": "lodging",
+      "language": "zh-CN",
+      "question": "希望落地就住机场附近，在哪里找酒店？",
+      "answer": "苏黎世旅游局汇集了机场周边住宿，可按酒店位置进一步核对到达后的交通方式。",
+      "applicability": "查找苏黎世机场附近的公开住宿资料。",
+      "source_url": "https://www.zuerich.com/en/inform-plan/find-accommodation/hotels/airport-hotels",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "hotel-airport-example",
+      "category": "lodging",
+      "language": "zh-CN",
+      "question": "苏黎世机场附近有哪些酒店可参考？",
+      "answer": "旅游局目录列有 Hotel Allegra Lodge、Dorint Airport-Hotel Zürich 等，可打开相应条目核对地址和设施。",
+      "applicability": "仅供初步选址，真实房态和价格需向酒店查询。",
+      "source_url": "https://www.zuerich.com/en/inform-plan/find-accommodation/hotels/airport-hotels",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "hotel-station-area",
+      "category": "lodging",
+      "language": "zh-CN",
+      "question": "要从苏黎世中央车站赶火车，怎么找住宿？",
+      "answer": "使用旅游局的中央车站附近酒店目录，打开具体条目检查地址和步行路线。",
+      "applicability": "需在 Zürich Hauptbahnhof 附近住宿。",
+      "source_url": "https://www.zuerich.com/en/inform-plan/find-accommodation/hotels/hotels-near-main-station",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "hotel-reference-source",
+      "category": "lodging",
+      "language": "zh-CN",
+      "question": "在哪里核实推荐的苏黎世酒店名称和位置？",
+      "answer": "查旅游局住宿目录中的对应酒店条目，必要时通过酒店网站复核地址和设施。",
+      "applicability": "核对公开酒店信息。项目显示的价格和库存属于合成演示。",
+      "source_url": "https://www.zuerich.com/en/inform-plan/find-accommodation",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "hotel-airport-or-city",
+      "category": "lodging",
+      "language": "zh-CN",
+      "question": "怎么比较苏黎世机场酒店和市区酒店？",
+      "answer": "可分别看机场酒店和全市住宿目录，用实际到达位置、后续交通需求和酒店地址比较。",
+      "applicability": "仅用于住宿区域比较，推荐和库存属于演示。",
+      "source_url": "https://www.zuerich.com/en/inform-plan/find-accommodation",
+      "checked_on": "2026-11-24"
+    },
+    {
+      "id": "hotel-look-up-amenities",
+      "category": "lodging",
+      "language": "zh-CN",
+      "question": "哪里查苏黎世酒店有没有需要的设施？",
+      "answer": "从旅游局目录打开酒店条目，查看公开设施资料，有特殊要求时向酒店确认。",
+      "applicability": "公开设施信息可查询，项目演示不保证真实服务或房态。",
+      "source_url": "https://www.zuerich.com/en/inform-plan/find-accommodation",
+      "checked_on": "2026-11-24"
+    }
+  ]
+}
