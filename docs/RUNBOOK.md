@@ -80,3 +80,20 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-local.ps1 -Action 
 构建失败时，原版本继续可查。恢复到先前发布的构建请使用 `rollback <build_id> --expected-revision <revision>`。修订号冲突时先读状态并核对，确定目标后再提交。构建、激活和回退不会自动删除集合。P8 通过文档 ID 读取 Qdrant 证据。向量、混检、精排和聊天 FAQ 将由 P9 接入。
 
 正常启动会应用迁移 0004 并补齐酒店目录。从 demo-a 会话发送「找 DEMO-A3 落地后的机场酒店，住 2 晚」，可查看 2026-12-20 至 22 日的演示房源和旅游局来源。再次启动只补缺库存，保留已预订扣减。
+
+
+## P9 公共旅行政策检索
+
+正式聊天可直接提问，例如“行李延误怎么办？”，也可以在行程请求后追加公共政策问题，例如“查 DEMO-A1 航班，顺便问行李延误怎么办？”。网页展示政策引用、适用条件和精排降级提示。打开先前的会话可恢复最新一轮的证据。涉及个人信息的政策子问可能需要重新表述。
+
+默认模式 disabled 允许使用现有项目服务，并禁止请求硅基流动。要构建或运行真实混检，通过本机环境或已忽略的 .env 设置 TRAVEL_FAQ_MODE=siliconflow 及 SILICONFLOW_API_KEY。依次使用既有 FAQ CLI：
+
+1. 运行 init，确保旧库增加构建配置表。
+2. 运行 import，传入 FAQ 源文件。读取命令输出的 version_id。
+3. 运行 build <version_id> --hybrid，取得已核验的 build_id。
+4. 运行 status，确认版本及当前 revision。运行 activate <build_id> --expected-revision <revision>。
+5. 需要回退时，用 rollback <build_id> --expected-revision <revision>。回退到 P8 证据版本后仍可按文档查证据，混检状态为 not_published。
+
+前四个 CLI 子命令均由 .\.venv\Scripts\python.exe -B scripts\manage_faq.py 执行。构建和回退用独立集合与修订号。真实构建会发送公开 FAQ 切片请求嵌入。
+
+单独运行 .\.venv\Scripts\python.exe -B scripts\verify_faq_siliconflow.py --max-requests 10 可验收真实嵌入与精排。该命令创建临时表和集合，退出前清理，只打印状态和调用次数。

@@ -190,6 +190,26 @@ def verify_booking(client, path, last_recommendation, password_b):
     print("PASS P7 proposal, refusal, cross-account protection, stale quote, duplicate approval and stock/receipt", flush=True)
 
 
+def verify_offline_faq(client, path, hotel_path):
+    faq_statuses = {"ok", "not_published", "no_evidence", "unavailable"}
+    standalone = require(client.post(path + "/messages", json={"content": "行李延误怎么办？"}), 201).json()
+    assert standalone["status"] == "faq" and standalone["faq"]["status"] in faq_statuses
+    assert require(client.get(path), 200).json()["graph"]["faq"] == standalone["faq"]
+    for target, content, expected in (
+        (path, "查 DEMO-A1 航班，顺便问行李延误怎么办？", "recorded"),
+        (hotel_path, "找 DEMO-A1 落地后的酒店，住 1 晚，顺便问酒店设施怎么核实？", "hotel_results"),
+    ):
+        response = require(client.post(target + "/messages", json={"content": content}), 201)
+        result = response.json()
+        assert result["status"] == expected and result["faq"]["status"] in faq_statuses
+        audit = asyncio.run(read_audit(UUID(response.headers["X-Request-ID"])), loop_factory=asyncio.SelectorEventLoop)
+        assert ("search_public_faq", "ok") in audit, audit
+    blocked = require(client.post(path + "/messages", json={"content": "订单号 ABC12345 的行李延误怎么办？"}), 201).json()
+    assert blocked["faq"]["status"] == "rephrase"
+    print("PASS P9 formal HTTP standalone FAQ, both role tools, saved evidence status, and private query separation",
+          flush=True)
+
+
 async def remove_probe_schemas(tag):
     config = read_settings()
     engine = create_engine(config)
@@ -215,7 +235,7 @@ def run(live):
     os.environ["P2_DB_SCHEMA"] = business
     env = dict(os.environ, P2_DB_SCHEMA=business, P3_CHECKPOINT_SCHEMA=graph,
                P2_DEMO_A_PASSWORD=password_a, P2_DEMO_B_PASSWORD=password_b,
-               TRAVEL_FLIGHT_MODE=mode, TRAVEL_DEEPSEEK_RUN_LIMIT="1")
+               TRAVEL_FLIGHT_MODE=mode, TRAVEL_DEEPSEEK_RUN_LIMIT="1", TRAVEL_FAQ_MODE="disabled")
     port = free_port()
     try:
         with server(port, env) as client:
@@ -309,6 +329,7 @@ def run(live):
                 assert option["demo"] is True and option["checked_on"] == "2026-11-24"
                 assert option["source_url"].startswith("https://www.zuerich.com/en/accommodation/")
             print("PASS P8 sourced hotel options on formal HTTP, multi-night dates and sold-out filtering", flush=True)
+            verify_offline_faq(client, path, hotel_path)
         with server(free_port(), dict(env, REDIS_PORT=str(free_port())), launcher=False) as client:
             health = require(client.get("/health/ready"), 200).json()
             assert health["status"] == "degraded" and health["dependencies"]["redis"] is False

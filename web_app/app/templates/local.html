@@ -36,7 +36,7 @@ small { color: #486156; }
 <div id="app-panel" hidden>
 <section><header><h2>会话</h2><button id="logout" type="button">退出</button></header>
 <form id="session"><button id="new-thread" type="button">新建会话</button><input id="thread" aria-label="会话 ID" placeholder="会话 ID"><button>打开会话</button></form>
-<small id="graph"></small><ul id="messages"></ul><p id="hotel-reply" aria-live="polite"></p><ul id="hotel-options"></ul><section id="booking" aria-live="polite" hidden></section>
+<small id="graph"></small><ul id="messages"></ul><p id="hotel-reply" aria-live="polite"></p><ul id="hotel-options"></ul><div id="faq-evidence" aria-live="polite" hidden></div><section id="booking" aria-live="polite" hidden></section>
 <form id="send"><input name="content" aria-label="消息" placeholder="输入消息" required maxlength="4000"><button>发送</button></form></section>
 <div class="grid"><article><h2>本人航班</h2><p><small>合成行程 · 结果标明模型模式与机场数据来源</small></p><form id="flight"><select id="flights" aria-label="航班"><option value="">选择航班</option></select><button>查航班</button></form><pre id="flight-result"></pre></article>
 <article><h2>机场城市</h2><p><small>本地 MCP 示例目录</small></p><form id="airport"><input name="code" aria-label="机场代码" value="ZRH" maxlength="3" required><button>查城市</button></form><pre id="airport-result"></pre></article></div>
@@ -50,6 +50,7 @@ function clearThreadView() {
   ++viewGeneration;
   renderHotel(null);
   renderBooking(null);
+  renderFaq(null);
   $('messages').replaceChildren();
   $('graph').textContent = '';
 }
@@ -177,6 +178,56 @@ function renderBooking(booking, path) {
     panel.append(receipt);
   }
 }
+function renderFaq(result) {
+  const panel = $('faq-evidence');
+  panel.replaceChildren();
+  const faq = result?.faq;
+  panel.hidden = true;
+  if (!faq) return;
+
+  if (faq.degradation) {
+    const notice = document.createElement('p');
+    notice.textContent = '精排暂不可用，已使用混合检索证据。';
+    panel.append(notice);
+  }
+  if (faq.status !== 'ok' && result.status !== 'faq') {
+    const notice = document.createElement('p');
+    notice.textContent = {
+      no_evidence: '现有公开资料不足以核实这项政策。',
+      not_published: '政策检索暂未发布。',
+      unavailable: '政策检索暂不可用，请稍后再试。',
+      rephrase: '请单独重述政策问题，省略姓名、联系方式和订单号等个人信息。',
+    }[faq.status] || '政策检索暂不可用。';
+    panel.append(notice);
+  }
+
+  const citations = document.createElement('ul');
+  for (const citation of faq.citations || []) {
+    let source;
+    try { source = new URL(citation.source_url); }
+    catch { continue; }
+    if (source.protocol !== 'https:' || source.username || source.password ||
+        !['www.swiss.com', 'www.zuerich.com'].includes(source.host)) continue;
+    const item = document.createElement('li');
+    const title = document.createElement('a');
+    title.href = source.href;
+    title.target = '_blank';
+    title.rel = 'noopener noreferrer';
+    title.textContent = citation.title;
+    const text = document.createElement('p');
+    text.textContent = citation.text;
+    const note = document.createElement('small');
+    note.textContent = '适用条件：' + citation.applicability + ' · 核对日期 ' + citation.checked_on;
+    item.append(title, text, note);
+    citations.append(item);
+  }
+  if (citations.childElementCount) {
+    const heading = document.createElement('h2');
+    heading.textContent = '政策依据';
+    panel.append(heading, citations);
+  }
+  panel.hidden = !panel.childElementCount;
+}
 async function loadThread() {
   const path = threadPath(), generation = ++viewGeneration;
   let state;
@@ -191,6 +242,7 @@ async function loadThread() {
   if (generation !== viewGeneration || path !== threadPath()) return;
   renderHotel(state.graph, state.booking, path);
   renderBooking(state.booking, path);
+  renderFaq(state.graph);
   $('messages').replaceChildren();
   for (const message of state.messages) { const item=document.createElement('li'); item.textContent=message.content; $('messages').append(item); }
   $('graph').textContent = state.graph ? '已完成第 '+state.graph.turn_count+' 轮 · '+state.graph.status : '会话尚无处理结果';
