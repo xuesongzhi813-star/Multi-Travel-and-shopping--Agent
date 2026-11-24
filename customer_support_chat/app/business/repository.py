@@ -117,14 +117,20 @@ class BusinessRepository:
         nights = (query.check_out - query.check_in).days
         price = func.sum(inventory.c.price_minor)
         statement = (
-            select(hotel.c.id, hotel.c.name, hotel.c.area, inventory.c.room_type, inventory.c.currency, price)
+            select(
+                hotel.c.id, hotel.c.name, hotel.c.area, inventory.c.room_type, inventory.c.currency,
+                price, hotel.c.source_url, hotel.c.checked_on, hotel.c.demo,
+            )
             .join(inventory, hotel.c.id == inventory.c.hotel_id)
             .where(
                 inventory.c.stay_date >= query.check_in,
                 inventory.c.stay_date < query.check_out,
                 inventory.c.quantity > 0,
             )
-            .group_by(hotel.c.id, hotel.c.name, hotel.c.area, inventory.c.room_type, inventory.c.currency)
+            .group_by(
+                hotel.c.id, hotel.c.name, hotel.c.area, inventory.c.room_type, inventory.c.currency,
+                hotel.c.source_url, hotel.c.checked_on, hotel.c.demo,
+            )
             .having(func.count(distinct(inventory.c.stay_date)) == nights)
             .order_by(inventory.c.currency, price, hotel.c.id, inventory.c.room_type)
             .limit(5)
@@ -136,6 +142,7 @@ class BusinessRepository:
         async with self.engine.connect() as connection:
             rows = (await connection.execute(statement)).all()
         return [
-            HotelOption(hotel_id, name, area, room, query.check_in, query.check_out, total, currency)
-            for hotel_id, name, area, room, currency, total in rows
+            HotelOption(hotel_id, name, area, room, query.check_in, query.check_out, total, currency,
+                        source_url=source, checked_on=checked, demo=demo)
+            for hotel_id, name, area, room, currency, total, source, checked, demo in rows
         ]

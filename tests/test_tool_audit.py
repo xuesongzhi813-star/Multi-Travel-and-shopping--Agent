@@ -21,9 +21,9 @@ class PostgresAuditTests(BusinessDatabaseTest):
             config.attributes.update(connection=connection, business_schema=self.settings.schema)
             command.downgrade(config, "0001_business")
 
+        await seed_demo(self.engine, self.settings.schema, ("test-a-12345678", "test-b-12345678"))
         async with self.engine.begin() as db:
             await db.run_sync(downgrade)
-        await seed_demo(self.engine, self.settings.schema, ("test-a-12345678", "test-b-12345678"))
         repository = BusinessRepository(self.engine, self.settings.schema)
         before = await repository.list_itineraries(DEMO_USERS[0][0])
         self.assertTrue(before)

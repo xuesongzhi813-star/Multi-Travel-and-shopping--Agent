@@ -3,7 +3,7 @@
 from dataclasses import dataclass
 
 from sqlalchemy import (
-    BigInteger, CHAR, CheckConstraint, Column, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, MetaData,
+    BigInteger, Boolean, CHAR, CheckConstraint, Column, Date, DateTime, ForeignKey, ForeignKeyConstraint, Index, Integer, MetaData,
     String, Table, Text, UniqueConstraint, Uuid, func,
 )
 
@@ -76,6 +76,8 @@ def tables(schema: str) -> BusinessTables:
         Column("id", String(32), primary_key=True),
         Column("name", String(120), nullable=False),
         Column("area", String(32), nullable=False),
+        Column("source_url", Text), Column("checked_on", Date), Column("facilities", JSONB),
+        Column("demo", Boolean), Column("demo_terms", Text),
     )
     inventory = Table(
         "hotel_inventory", metadata,

@@ -41,15 +41,23 @@ class HotelOption:
     check_out: date
     total_minor: int
     currency: str
+    source_url: str | None = None
+    checked_on: date | None = None
+    demo: bool | None = None
 
     def to_json(self) -> dict:
-        return asdict(self) | {"check_in": self.check_in.isoformat(), "check_out": self.check_out.isoformat()}
+        fields = asdict(self) | {"check_in": self.check_in.isoformat(), "check_out": self.check_out.isoformat()}
+        if self.checked_on is not None:
+            fields["checked_on"] = self.checked_on.isoformat()
+        return {name: value for name, value in fields.items() if value is not None}
 
     @classmethod
     def from_json(cls, payload: dict) -> "HotelOption":
+        checked_on = payload.get("checked_on")
         return cls(**(payload | {
             "check_in": date.fromisoformat(payload["check_in"]),
             "check_out": date.fromisoformat(payload["check_out"]),
+            "checked_on": date.fromisoformat(checked_on) if checked_on is not None else None,
         }))
 
 

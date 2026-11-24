@@ -121,6 +121,24 @@ function renderHotel(result, booking, path) {
   for (const [option_index, option] of (result?.hotel_options || []).entries()) {
     const item = document.createElement('li');
     item.textContent = stayText(option);
+    if (option.demo) item.append(' · 合成库存');
+    if (option.source_url) {
+      try {
+        const link = new URL(option.source_url);
+        if (link.protocol === 'https:' && link.host === 'www.zuerich.com' &&
+            !link.username && !link.password && /^\/en\/accommodation\/[a-z0-9-]+$/.test(link.pathname)) {
+          const source = document.createElement('a');
+          source.href = link.href;
+          source.textContent = '酒店资料来源';
+          source.target = '_blank';
+          source.rel = 'noopener noreferrer';
+          item.append(' · ', source);
+          if (option.checked_on) item.append('（' + option.checked_on + ' 核对）');
+        }
+      } catch {
+        // Ignore malformed external source metadata.
+      }
+    }
     if (!busy && booking?.message_id !== result.message_id) {
       item.append(' ', bookingButton('发起演示预订', () => postBooking(path, '/hotel-proposals', {
         message_id: result.message_id, option_index,

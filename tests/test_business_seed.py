@@ -38,12 +38,12 @@ class BusinessSeedTests(BusinessDatabaseTest):
             seed_demo(self.engine, self.settings.schema, PASSWORDS),
             seed_demo(self.engine, self.settings.schema, PASSWORDS),
         )
-        self.assertEqual(await self.counts(), [2, 6, 2])
+        self.assertEqual(await self.counts(), [2, 6, 18])
         airport = self.db.hotel_inventory.c.hotel_id == "demo-airport"
         async with self.engine.begin() as connection:
             await connection.execute(self.db.hotel_inventory.update().where(airport).values(quantity=1))
         await seed_demo(self.engine, self.settings.schema, ("alternate-a-password", "alternate-b-password"))
-        self.assertEqual(await self.counts(), [2, 6, 2])
+        self.assertEqual(await self.counts(), [2, 6, 18])
         async with self.engine.connect() as connection:
             quantity = await connection.scalar(select(self.db.hotel_inventory.c.quantity).where(airport))
             quantities = (await connection.scalars(select(self.db.hotel_inventory.c.quantity))).all()

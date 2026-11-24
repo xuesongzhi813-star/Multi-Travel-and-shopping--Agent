@@ -34,6 +34,9 @@ class HotelRow(BaseModel):
     check_out: str
     total_minor: int
     currency: str
+    source_url: str | None = None
+    checked_on: str | None = None
+    demo: bool | None = None
 
 
 class HotelToolData(BaseModel):

@@ -1,0 +1,236 @@
+{
+  "hotels": [
+    {
+      "id": "zurich-kameha",
+      "name": "Hotel Kameha Grand Zürich",
+      "area": "airport",
+      "source_url": "https://www.zuerich.com/en/accommodation/hotel-kameha-grand-zurich",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "餐厅",
+        "健身室"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 16500
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 16900
+          }
+        ]
+      }
+    },
+    {
+      "id": "zurich-movenpick",
+      "name": "Mövenpick Hotel Zurich Airport",
+      "area": "airport",
+      "source_url": "https://www.zuerich.com/en/accommodation/movenpick-hotel-zurich-airport",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "餐厅",
+        "会议室"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 17700
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 1,
+            "price_minor": 18100
+          }
+        ]
+      }
+    },
+    {
+      "id": "zurich-radisson-blu",
+      "name": "Radisson Blu Hotel, Zurich Airport",
+      "area": "airport",
+      "source_url": "https://www.zuerich.com/en/accommodation/radisson-blu-hotel-zurich-airport",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "餐厅",
+        "健身中心"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 1,
+            "price_minor": 19300
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 20500
+          }
+        ]
+      }
+    },
+    {
+      "id": "zurich-hyatt",
+      "name": "Hyatt Regency Zurich Airport Convention Center",
+      "area": "airport",
+      "source_url": "https://www.zuerich.com/en/accommodation/hotel-hyatt-regency-zurich-airport-convention-center",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "餐厅",
+        "直连会议中心"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 21000
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 0,
+            "price_minor": 21500
+          }
+        ]
+      }
+    },
+    {
+      "id": "zurich-ruby-mimi",
+      "name": "Ruby Hotel Mimi",
+      "area": "city",
+      "source_url": "https://www.zuerich.com/en/accommodation/ruby-hotel-mimi",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "酒吧",
+        "电影休息厅"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 14900
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 15400
+          }
+        ]
+      }
+    },
+    {
+      "id": "zurich-fred-guest",
+      "name": "Fred Guest House Zürich Hauptbahnhof",
+      "area": "city",
+      "source_url": "https://www.zuerich.com/en/accommodation/fred-guest-house-zurich-hauptbahnhof",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "餐厅",
+        "高速网络"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 3,
+            "price_minor": 10800
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 2,
+            "price_minor": 11400
+          }
+        ]
+      }
+    },
+    {
+      "id": "zurich-central",
+      "name": "Central Plaza Hotel",
+      "area": "city",
+      "source_url": "https://www.zuerich.com/en/accommodation/central-plaza-hotel",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "餐厅",
+        "健身房"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 1,
+            "price_minor": 18200
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 1,
+            "price_minor": 18800
+          }
+        ]
+      }
+    },
+    {
+      "id": "zurich-schweizerhof",
+      "name": "Hotel Schweizerhof Zürich",
+      "area": "city",
+      "source_url": "https://www.zuerich.com/en/accommodation/hotel-schweizerhof-zurich",
+      "checked_on": "2026-11-24",
+      "facilities": [
+        "餐厅",
+        "咖啡馆"
+      ],
+      "demo": {
+        "currency": "CHF",
+        "terms": "合成演示库存，不接受实际付款或真实预订。",
+        "nights": [
+          {
+            "stay_date": "2026-12-20",
+            "room_type": "standard",
+            "quantity": 0,
+            "price_minor": 22100
+          },
+          {
+            "stay_date": "2026-12-21",
+            "room_type": "standard",
+            "quantity": 1,
+            "price_minor": 23200
+          }
+        ]
+      }
+    }
+  ]
+}

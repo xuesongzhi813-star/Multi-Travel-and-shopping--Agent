@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncEngine
 
 from .auth import hash_password
+from .hotel_catalog import load_hotel_catalog
 from .schema import tables
 
 
@@ -51,6 +52,7 @@ async def seed_demo(engine: AsyncEngine, schema: str, passwords: tuple[str, str]
         raise ValueError("configure two distinct demo passwords of 12 to 256 characters")
     hashes = await asyncio.to_thread(lambda: [hash_password(password) for password in passwords])
     db = tables(schema)
+    catalog = load_hotel_catalog()
     users = [
         {"id": user_id, "username": username, "password_hash": password_hash}
         for (user_id, username), password_hash in zip(DEMO_USERS, hashes, strict=True)
@@ -58,7 +60,8 @@ async def seed_demo(engine: AsyncEngine, schema: str, passwords: tuple[str, str]
     async with engine.begin() as connection:
         for table, rows in (
             (db.users, users), (db.flight_itineraries, flight_rows()),
-            (db.hotels, HOTELS), (db.hotel_inventory, INVENTORY),
+            (db.hotels, HOTELS), (db.hotels, catalog.hotels),
+            (db.hotel_inventory, INVENTORY), (db.hotel_inventory, catalog.inventory),
         ):
             statement = insert(table).values(list(rows)).on_conflict_do_nothing(
                 index_elements=list(table.primary_key.columns),
