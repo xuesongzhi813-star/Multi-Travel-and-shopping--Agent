@@ -12,6 +12,8 @@ from secrets import token_urlsafe
 from typing import Annotated
 from uuid import UUID
 
+import httpx
+from redis.asyncio import Redis
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
@@ -27,15 +29,21 @@ from customer_support_chat.app.business.booking_repository import BookingReposit
 from customer_support_chat.app.tooling.audit import PostgresAuditSink
 from customer_support_chat.app.tooling.booking import ApprovedBookingExecutor
 from customer_support_chat.app.business.auth import hash_password, verify_password
-from customer_support_chat.app.business.database import DatabaseSettings, create_engine, read_settings
+from customer_support_chat.app.business.database import DatabaseSettings, create_engine, local_value, read_settings
 from customer_support_chat.app.business.repository import BusinessRepository
 from customer_support_chat.app.workflow.checkpoints import (
     ROLE_GRAPH_TIMEOUT, GraphUnavailable, open_graph_runtime, read_checkpoint_schema,
 )
 from customer_support_chat.app.workflow.hotel_handoff import HotelOption, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival
-from customer_support_chat.app.workflow.parent_graph import REFUSAL_MESSAGE
+from customer_support_chat.app.workflow.parent_graph import FaqSearch, REFUSAL_MESSAGE
 from customer_support_chat.app.workflow.thread_lock import try_thread_lock
 
+
+from faq_extension.cache import FaqEvidenceCache
+from faq_extension.contracts import FaqSearchResult, PublicFaqQuestion
+from faq_extension.mysql_catalog import MySqlFaqCatalog, MySqlFaqSettings
+from faq_extension.retrieval import FaqSearchService
+from faq_extension.siliconflow import SiliconFlowFaqClient
 
 from .bookings import BookingCoordinator
 from .local_tools import FlightSettings, LocalToolError, LocalToolTimeout, ROLE_PYTHON, run_local_tool
@@ -140,8 +148,33 @@ def booking_conflict(request: Request, error: ProposalConflict):
     return error_response(request, 409, error.code, details.get(error.code, "请重新查询酒店并选择。"))
 
 
+@asynccontextmanager
+async def open_faq_search():
+    try:
+        catalog = MySqlFaqCatalog(MySqlFaqSettings.read())
+        qdrant_port = int(local_value("QDRANT_PORT", "6333"))
+        redis_port = int(local_value("REDIS_PORT", "6379"))
+        if not all(1 <= port <= 65535 for port in (qdrant_port, redis_port)):
+            raise ValueError("Invalid local FAQ ports")
+    except (ValueError, OSError):
+        yield None
+        return
+
+    provider = None
+    if local_value("TRAVEL_FAQ_MODE", "disabled") == "siliconflow":
+        key = local_value("SILICONFLOW_API_KEY").strip()
+        if key:
+            provider = SiliconFlowFaqClient(key)
+    async with (
+        httpx.AsyncClient(base_url=f"http://127.0.0.1:{qdrant_port}", timeout=8, trust_env=False) as qdrant,
+        Redis(host="127.0.0.1", port=redis_port, socket_timeout=0.2, socket_connect_timeout=0.2) as redis,
+    ):
+        yield FaqSearchService(catalog, qdrant, provider, FaqEvidenceCache(redis))
+
+
 def create_app(
     settings: DatabaseSettings | None = None, *, checkpoint_schema: str | None = None,
+    faq_search: FaqSearch | None = None,
 ) -> FastAPI:
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -216,12 +249,20 @@ def create_app(
                 except (KeyError, TypeError, ValueError) as error:
                     raise RoleUnavailable("Invalid hotel receipt") from error
 
-            async with open_graph_runtime(
-                config, schema, repository.read_owned_message, flight_lookup=flight_lookup, hotel_search=hotel_search,
-                booking_repository=booking_repository, booking_executor=booking_executor,
-            ) as graph:
-                app.state.graph = graph
-                yield
+            async with open_faq_search() as faq_service:
+                async def search_policy(question: PublicFaqQuestion) -> FaqSearchResult:
+                    if faq_service is None:
+                        return FaqSearchResult(status="unavailable")
+                    _, deadline = role_turn.get()
+                    return await faq_service.search(question, deadline=deadline)
+
+                async with open_graph_runtime(
+                    config, schema, repository.read_owned_message, flight_lookup=flight_lookup, hotel_search=hotel_search,
+                    booking_repository=booking_repository, booking_executor=booking_executor,
+                    faq_search=faq_search or search_policy,
+                ) as graph:
+                    app.state.graph = graph
+                    yield
         finally:
             await engine.dispose()
 
@@ -440,7 +481,7 @@ def create_app(
         response = {"message_id": message_id, "status": result["status"]}
         if result["status"] == "rejected":
             response["reply"] = REFUSAL_MESSAGE
-        for field in ("reply", "hotel_options"):
+        for field in ("reply", "hotel_options", "faq"):
             if field in result:
                 response[field] = result[field]
         return response

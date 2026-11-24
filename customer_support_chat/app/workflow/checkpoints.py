@@ -21,7 +21,7 @@ from customer_support_chat.app.business.booking_repository import BookingReposit
 from customer_support_chat.app.tooling.booking import ApprovedBookingExecutor
 from customer_support_chat.app.business.database import DatabaseSettings, connection_kwargs, local_value, validate_schema
 from .hotel_handoff import HotelOption
-from .parent_graph import BOOKING_NODE, FlightLookup, GraphResult, HotelSearch, MessageLoader, build_parent_graph
+from .parent_graph import BOOKING_NODE, FaqSearch, FlightLookup, GraphResult, HotelSearch, MessageLoader, build_parent_graph
 
 
 ROLE_GRAPH_TIMEOUT = 40
@@ -92,6 +92,7 @@ class GraphRuntime:
         self, saver: AsyncPostgresSaver, load_message: MessageLoader, *,
         flight_lookup: FlightLookup | None = None, hotel_search: HotelSearch | None = None,
         booking_repository: BookingRepository | None = None, booking_executor: ApprovedBookingExecutor | None = None,
+        faq_search: FaqSearch | None = None,
     ):
         self.saver = saver
         self.load_message = load_message
@@ -99,9 +100,10 @@ class GraphRuntime:
         self.hotel_search = hotel_search
         self.booking_repository = booking_repository
         self.booking_executor = booking_executor
+        self.faq_search = faq_search
         self.graph: CompiledStateGraph = build_parent_graph(
             load_message, saver, flight_lookup=flight_lookup, hotel_search=hotel_search,
-            booking_execute=self._resolve_booking if booking_executor is not None else None,
+            booking_execute=self._resolve_booking if booking_executor is not None else None, faq_search=faq_search,
         )
 
     async def _resolve_booking(self, scope, request_id):
@@ -111,7 +113,7 @@ class GraphRuntime:
         return GraphRuntime(
             AsyncPostgresSaver(connection, serde=CheckpointJsonSerializer()), self.load_message,
             flight_lookup=self.flight_lookup, hotel_search=self.hotel_search,
-            booking_repository=self.booking_repository, booking_executor=self.booking_executor,
+            booking_repository=self.booking_repository, booking_executor=self.booking_executor, faq_search=self.faq_search,
         )
 
     async def read_booking(self, thread_id: UUID, *, connection: AsyncConnection | None = None) -> BookingGraphState:
@@ -226,6 +228,7 @@ async def open_graph_runtime(
     settings: DatabaseSettings, schema: str, load_message: MessageLoader, *,
     flight_lookup: FlightLookup | None = None, hotel_search: HotelSearch | None = None,
     booking_repository: BookingRepository | None = None, booking_executor: ApprovedBookingExecutor | None = None,
+    faq_search: FaqSearch | None = None,
 ) -> AsyncIterator[GraphRuntime]:
     pool = AsyncConnectionPool(
         kwargs=checkpoint_kwargs(settings, schema), open=False,
@@ -235,5 +238,5 @@ async def open_graph_runtime(
         saver = AsyncPostgresSaver(pool, serde=CheckpointJsonSerializer())
         yield GraphRuntime(
             saver, load_message, flight_lookup=flight_lookup, hotel_search=hotel_search,
-            booking_repository=booking_repository, booking_executor=booking_executor,
+            booking_repository=booking_repository, booking_executor=booking_executor, faq_search=faq_search,
         )

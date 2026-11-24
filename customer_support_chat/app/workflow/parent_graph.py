@@ -12,6 +12,8 @@ from langgraph.graph.state import CompiledStateGraph
 
 from customer_support_chat.app.business.booking import BookingOwner, BookingResolution, BookingScope
 from customer_support_chat.app.tooling.executor import valid_tool_call_id
+from faq_extension.contracts import FaqSearchResult, PublicFaqQuestion
+from .faq_turn import classify_faq_turn, faq_reply
 from .hotel_handoff import (
     HotelPending, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival,
     resolve_hotel_turn, stay_checkout,
@@ -23,9 +25,10 @@ MessageLoader = Callable[[UUID, UUID, UUID], Awaitable[str | None]]
 GuardEvaluator = Callable[[str], Awaitable[GuardDecision]]
 FlightLookup = Callable[[UUID, UUID, str], Awaitable[VerifiedArrival | None]]
 HotelSearch = Callable[[UUID, UUID, HotelQuery], Awaitable[HotelRoleResult]]
+FaqSearch = Callable[[PublicFaqQuestion], Awaitable[FaqSearchResult]]
 BookingExecutor = Callable[[BookingScope, UUID], Awaitable[BookingResolution]]
 BOOKING_NODE = "apply_booking_decision"
-TurnStatus = Literal["recorded", "rejected", "needs_clarification", "hotel_results", "no_availability", "unavailable"]
+TurnStatus = Literal["recorded", "rejected", "needs_clarification", "hotel_results", "no_availability", "unavailable", "faq"]
 RETRY_HOTEL = "暂时无法完成酒店查询，请重新发送包含航班和晚数的完整请求。"
 REFUSAL_MESSAGE = "这条消息无法处理，请改问你自己的旅行安排。"
 REJECT_PHRASES = (
@@ -43,6 +46,7 @@ class GraphResult(TypedDict):
     status: TurnStatus
     reply: NotRequired[str]
     hotel_options: NotRequired[list[dict]]
+    faq: NotRequired[dict]
     turn_count: int
 
 
@@ -70,6 +74,7 @@ def build_parent_graph(
     flight_lookup: FlightLookup | None = None,
     hotel_search: HotelSearch | None = None,
     booking_execute: BookingExecutor | None = None,
+    faq_search: FaqSearch | None = None,
 ) -> CompiledStateGraph:
     async def check_input(state: GraphState, config: RunnableConfig) -> GraphState:
         content = await load_message(
@@ -92,13 +97,31 @@ def build_parent_graph(
         return {"completed": result}
 
     async def allow(state: GraphState, config: RunnableConfig) -> GraphState:
-        if flight_lookup is None or hotel_search is None:
-            return complete(state, "recorded")
         user = UUID(state["user_id"])
         thread = UUID(config["configurable"]["thread_id"])
         content = await load_message(user, thread, UUID(state["message_id"]))
         if content is None:
             raise LookupError("Owned graph input is missing")
+        if faq_search is None:
+            return await business_turn(state, user, thread, content)
+
+        faq_turn = classify_faq_turn(content)
+        if faq_turn.kind == "ordinary":
+            return await business_turn(state, user, thread, content)
+        if faq_turn.question is None:
+            policy = FaqSearchResult(status="rephrase")
+        else:
+            policy = await faq_search(faq_turn.question)
+        if faq_turn.business_text:
+            update = await business_turn(state, user, thread, faq_turn.business_text)
+        else:
+            update = complete(state, "faq", faq_reply(policy))
+        update["completed"]["faq"] = policy.model_dump(mode="json")
+        return update
+
+    async def business_turn(state: GraphState, user: UUID, thread: UUID, content: str) -> GraphState:
+        if flight_lookup is None or hotel_search is None:
+            return complete(state, "recorded")
         turn = resolve_hotel_turn(content, state.get("hotel_pending"))
         if turn.action == "ordinary":
             return complete(state, "recorded")
