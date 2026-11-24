@@ -8,6 +8,7 @@ from typing import Literal
 from uuid import UUID
 
 import pymysql
+from pymysql.constants.ER import NO_SUCH_TABLE
 from pymysql.cursors import DictCursor
 
 from customer_support_chat.app.business.database import local_value
@@ -45,6 +46,26 @@ class MySqlFaqSettings:
 
 
 @dataclass(frozen=True)
+class FaqIndexProfile:
+    kind: Literal["evidence", "hybrid"]
+    embedding_model: str | None = None
+    dimensions: int | None = None
+    tokenizer: str | None = None
+
+    def __post_init__(self) -> None:
+        fields = (self.embedding_model, self.dimensions, self.tokenizer)
+        if self.kind == "evidence" and all(value is None for value in fields):
+            return
+        if (self.kind == "hybrid" and self.embedding_model and self.tokenizer
+                and type(self.dimensions) is int and self.dimensions > 0):
+            return
+        raise CatalogConflict("Invalid FAQ index profile")
+
+
+EVIDENCE_PROFILE = FaqIndexProfile("evidence")
+
+
+@dataclass(frozen=True)
 class FaqBuild:
     build_id: UUID
     version_id: str
@@ -53,6 +74,7 @@ class FaqBuild:
     status: Literal["building", "verified", "failed"]
     point_count: int
     payload_digest: str | None
+    profile: FaqIndexProfile = EVIDENCE_PROFILE
 
 
 @dataclass(frozen=True)
@@ -61,6 +83,7 @@ class PublicationPointer:
     version_id: str | None = None
     build_id: UUID | None = None
     collection: str | None = None
+    profile: FaqIndexProfile = EVIDENCE_PROFILE
 
 
 class MySqlFaqCatalog:
@@ -109,6 +132,10 @@ class MySqlFaqCatalog:
             active: (
                 "singleton TINYINT PRIMARY KEY, revision BIGINT UNSIGNED NOT NULL, build_id CHAR(36) NULL,"
                 " CHECK(singleton=1)"
+            ),
+            self._table("index_profiles"): (
+                "build_id CHAR(36) PRIMARY KEY, embedding_model VARCHAR(128) NOT NULL,"
+                " dimensions INT UNSIGNED NOT NULL, tokenizer VARCHAR(32) NOT NULL"
             ),
             history: (
                 "revision BIGINT UNSIGNED PRIMARY KEY, build_id CHAR(36) NOT NULL, rollback BOOLEAN NOT NULL,"
@@ -179,6 +206,13 @@ class MySqlFaqCatalog:
             )
             if result != 1:
                 raise CatalogConflict("FAQ build does not match a stored version")
+            if build.profile.kind == "hybrid":
+                cursor.execute(
+                    f"INSERT INTO {self._table('index_profiles')}"
+                    "(build_id,embedding_model,dimensions,tokenizer) VALUES(%s,%s,%s,%s)",
+                    (str(build.build_id), build.profile.embedding_model,
+                     build.profile.dimensions, build.profile.tokenizer),
+                )
 
     def finish_build(self, build_id: UUID, *, verified: bool, point_count: int, payload_digest: str | None) -> None:
         if (verified and (point_count <= 0 or not re.fullmatch(r"[0-9a-f]{64}", payload_digest or ""))) or (
@@ -195,11 +229,31 @@ class MySqlFaqCatalog:
                 raise CatalogConflict("FAQ build is no longer running")
 
     def _get_build(self, cursor, build_id: UUID) -> FaqBuild:
-        cursor.execute(f"SELECT * FROM {self._table('builds')} WHERE build_id=%s", (str(build_id),))
-        row = cursor.fetchone()
+        row = self._read_profiled(
+            cursor, "b.*", f"FROM {self._table('builds')} b", "WHERE b.build_id=%s", (str(build_id),),
+        )
         if row is None:
             raise CatalogNotFound("FAQ build not found")
         return FaqBuild(**(row | {"build_id": UUID(row["build_id"])}))
+
+    def _read_profiled(self, cursor, columns, tables, condition, params=()):
+        try:
+            cursor.execute(
+                f"SELECT {columns},p.build_id AS profile_id,p.embedding_model,p.dimensions,p.tokenizer "
+                f"{tables} LEFT JOIN {self._table('index_profiles')} p ON p.build_id=b.build_id {condition}",
+                params,
+            )
+        except pymysql.err.ProgrammingError as error:
+            if not error.args or error.args[0] != NO_SUCH_TABLE:
+                raise
+            cursor.execute(f"SELECT {columns} {tables} {condition}", params)
+        row = cursor.fetchone()
+        if row is not None and "profile_id" in row:
+            profile_id = row.pop("profile_id")
+            model, dimensions, tokenizer = (row.pop(key) for key in ("embedding_model", "dimensions", "tokenizer"))
+            if profile_id is not None:
+                row["profile"] = FaqIndexProfile("hybrid", model, dimensions, tokenizer)
+        return row
 
     def get_build(self, build_id: UUID) -> FaqBuild:
         with self._connect() as connection, connection.cursor() as cursor:
@@ -207,11 +261,13 @@ class MySqlFaqCatalog:
 
     def active(self) -> PublicationPointer:
         with self._connect() as connection, connection.cursor() as cursor:
-            cursor.execute(
-                f"SELECT a.revision,b.version_id,b.build_id,b.collection FROM {self._table('active')} a "
-                f"LEFT JOIN {self._table('builds')} b ON a.build_id=b.build_id WHERE a.singleton=1"
+            row = self._read_profiled(
+                cursor, "a.revision,b.version_id,b.build_id,b.collection",
+                f"FROM {self._table('active')} a LEFT JOIN {self._table('builds')} b ON a.build_id=b.build_id",
+                "WHERE a.singleton=1",
             )
-            row = cursor.fetchone()
+            if row is None:
+                raise CatalogNotFound("FAQ publication is not initialized")
             return PublicationPointer(**(row | {"build_id": UUID(row["build_id"]) if row["build_id"] else None}))
 
     def activate(self, build_id: UUID, *, expected_revision: int, rollback: bool = False) -> PublicationPointer:
@@ -231,4 +287,4 @@ class MySqlFaqCatalog:
             cursor.execute(f"UPDATE {active} SET revision=%s,build_id=%s WHERE singleton=1", (revision, str(build_id)))
             cursor.execute(f"INSERT INTO {history}(revision,build_id,rollback) VALUES(%s,%s,%s)",
                            (revision, str(build_id), rollback))
-            return PublicationPointer(revision, build.version_id, build_id, build.collection)
+            return PublicationPointer(revision, build.version_id, build_id, build.collection, build.profile)

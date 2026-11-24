@@ -17,6 +17,7 @@ from customer_support_chat.app.business.database import local_value
 from faq_extension.catalog import load_faq_version
 from faq_extension.mysql_catalog import CatalogConflict, CatalogNotFound, MySqlFaqCatalog, MySqlFaqSettings
 from faq_extension.publication import FaqNotPublished, FaqPublisher, PublicationError
+from faq_extension.siliconflow import SiliconFlowFaqClient
 
 
 class JsonArgumentParser(argparse.ArgumentParser):
@@ -31,7 +32,9 @@ def parser() -> argparse.ArgumentParser:
     commands.add_parser("init")
     commands.add_parser("status")
     commands.add_parser("import").add_argument("path", type=Path)
-    commands.add_parser("build").add_argument("version_id")
+    build = commands.add_parser("build")
+    build.add_argument("version_id")
+    build.add_argument("--hybrid", action="store_true")
     commands.add_parser("evidence").add_argument("document_id")
     for name in ("activate", "rollback"):
         command = commands.add_parser(name)
@@ -51,7 +54,7 @@ def execute(args, catalog: MySqlFaqCatalog, publisher: FaqPublisher) -> dict:
         return {"status": "imported" if created else "already_imported", "version_id": version.version_id,
                 "digest": version.digest, "document_count": len(version.documents)}
     if command == "build":
-        return asdict(publisher.build(args.version_id))
+        return asdict(publisher.build(args.version_id, hybrid=args.hybrid))
     if command == "status":
         return asdict(catalog.active())
     if command == "evidence":
@@ -75,7 +78,14 @@ def main(argv=None) -> int:
             raise ValueError("Invalid port")
         catalog = MySqlFaqCatalog(settings)
         with httpx.Client(base_url=f"http://127.0.0.1:{port}", timeout=8, trust_env=False) as client:
-            result = execute(args, catalog, FaqPublisher(catalog, client))
+            if args.command == "build" and args.hybrid:
+                if local_value("TRAVEL_FAQ_MODE", "disabled") != "siliconflow":
+                    raise ValueError("Hybrid FAQ embeddings must be enabled explicitly")
+                embedder = SiliconFlowFaqClient(local_value("SILICONFLOW_API_KEY")).embed
+                publisher = FaqPublisher(catalog, client, embedder=embedder)
+            else:
+                publisher = FaqPublisher(catalog, client)
+            result = execute(args, catalog, publisher)
     except (CatalogConflict, CatalogNotFound, ValueError, OSError):
         print(json.dumps({"status": "invalid_request_or_conflict"}))
         return 2

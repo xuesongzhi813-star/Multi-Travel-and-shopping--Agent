@@ -23,7 +23,7 @@ class MySqlFixture(unittest.TestCase):
         self.release = load_faq_version(SOURCE)
 
     def drop_tables(self):
-        names = ("history", "active", "builds", "documents", "versions")
+        names = ("history", "active", "index_profiles", "builds", "documents", "versions")
         with self.catalog._connect() as connection, connection.cursor() as cursor:
             for name in names:
                 cursor.execute(f"DROP TABLE IF EXISTS `{self.prefix}_{name}`")
