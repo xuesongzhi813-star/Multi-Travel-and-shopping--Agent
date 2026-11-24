@@ -6,6 +6,8 @@ import re
 from typing import Literal, TypedDict
 from unicodedata import normalize
 
+from faq_extension.contracts import FaqSearchResult
+
 
 @dataclass(frozen=True)
 class HotelQuery:
@@ -65,6 +67,7 @@ class HotelOption:
 class HotelRoleResult:
     status: Literal["hotel_results", "no_availability", "unavailable"]
     options: tuple[HotelOption, ...] = ()
+    faq: FaqSearchResult | None = None
 
 
 class RoleUnavailable(RuntimeError):
@@ -79,6 +82,7 @@ class VerifiedArrival:
     local_date: date
     timezone: str
     tool_call_id: str
+    faq: FaqSearchResult | None = None
 
 
 class HotelPending(TypedDict, total=False):

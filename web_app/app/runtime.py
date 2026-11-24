@@ -6,6 +6,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
+import json
 from pathlib import Path
 import re
 from secrets import token_urlsafe
@@ -19,7 +20,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from psycopg import Error as PostgresError
-from pydantic import BaseModel, ConfigDict, Field, StringConstraints
+from pydantic import BaseModel, ConfigDict, Field, StringConstraints, ValidationError
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from customer_support_chat.app.business.booking import (
@@ -196,22 +197,38 @@ def create_app(
             app.state.live_active = False
             app.state.engine = engine
             app.state.dummy_password_hash = await asyncio.to_thread(hash_password, token_urlsafe(32))
-            async def role_tool(operation: str, user: UUID, thread: UUID, value: str | dict) -> dict:
+            async def role_tool(
+                operation: str, user: UUID, thread: UUID, value: str | dict,
+                *, faq_question: PublicFaqQuestion | None = None,
+            ) -> dict:
                 request_id, deadline = role_turn.get()
                 slots = app.state.tool_slots
                 if slots.locked():
                     raise RoleUnavailable("Local tools are busy")
                 try:
+                    faq_options = {
+                        "faq_question": faq_question, "faq_lookup": faq_search or search_policy,
+                    } if faq_question is not None else {}
                     async with slots:
                         return await run_local_tool(
                             operation, user, value, config, request_id,
-                            flight_mode="offline", thread_id=thread, deadline=deadline,
+                            flight_mode="offline", thread_id=thread, deadline=deadline, **faq_options,
                         )
                 except LocalToolError as error:
                     raise RoleUnavailable("Local role failed") from error
 
-            async def flight_lookup(user: UUID, thread: UUID, reference: str) -> VerifiedArrival | None:
-                result = await role_tool("flight", user, thread, reference)
+            def role_faq(result: dict, question: PublicFaqQuestion | None) -> FaqSearchResult | None:
+                if question is None:
+                    return None
+                try:
+                    return FaqSearchResult.model_validate_json(json.dumps(result.get("faq")))
+                except (TypeError, ValidationError):
+                    return FaqSearchResult(status="unavailable")
+
+            async def flight_lookup(
+                user: UUID, thread: UUID, reference: str, *, faq_question: PublicFaqQuestion | None = None,
+            ) -> VerifiedArrival | None:
+                result = await role_tool("flight", user, thread, reference, faq_question=faq_question)
                 if result.get("status") == "not_found":
                     return None
                 try:
@@ -224,16 +241,19 @@ def create_app(
                     return VerifiedArrival(
                         handoff["reference"], airport_data["city"] or "", airport_data["code"],
                         date.fromisoformat(handoff["arrival_date_local"]), handoff["arrival_timezone"],
-                        handoff["source_tool_call_id"],
+                        handoff["source_tool_call_id"], role_faq(result, faq_question),
                     )
                 except (KeyError, TypeError, ValueError) as error:
                     raise RoleUnavailable("Invalid flight receipt") from error
 
-            async def hotel_search(user: UUID, thread: UUID, query: HotelQuery) -> HotelRoleResult:
-                result = await role_tool("hotel", user, thread, query.to_json())
+            async def hotel_search(
+                user: UUID, thread: UUID, query: HotelQuery, *, faq_question: PublicFaqQuestion | None = None,
+            ) -> HotelRoleResult:
+                result = await role_tool("hotel", user, thread, query.to_json(), faq_question=faq_question)
+                policy = role_faq(result, faq_question)
                 status = result.get("status")
                 if status in ("unavailable", "no_availability"):
-                    return HotelRoleResult(status)
+                    return HotelRoleResult(status, faq=policy)
                 try:
                     if status != "hotel_results":
                         raise ValueError("Invalid hotel outcome")
@@ -245,7 +265,7 @@ def create_app(
                         for option in options
                     ):
                         raise ValueError("Invalid hotel options")
-                    return HotelRoleResult("hotel_results", options)
+                    return HotelRoleResult("hotel_results", options, policy)
                 except (KeyError, TypeError, ValueError) as error:
                     raise RoleUnavailable("Invalid hotel receipt") from error
 

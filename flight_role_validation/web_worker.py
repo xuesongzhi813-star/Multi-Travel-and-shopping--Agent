@@ -16,6 +16,8 @@ from customer_support_chat.app.tooling.executor import ToolContext, ToolExecutor
 
 from customer_support_chat.app.workflow.hotel_handoff import HotelQuery
 
+from faq_extension.contracts import FaqSearchResult, PublicFaqQuestion
+from .public_faq import FAQ_FRAME_LIMIT, FAQ_ROLES, FAQ_TOOL, FaqLookup
 from .hotel import HOTEL_TOOL, run_hotel_role
 from .executor import FlightToolData, build_repository_lookup, register_flight_tool
 from .mcp_tools import AIRPORT_TOOL, MCP_ROLE, open_airport_session, register_airport_tools
@@ -37,7 +39,8 @@ async def airport(context: ToolContext, audit: PostgresAuditSink, code: str) -> 
 
 
 async def flight(context: ToolContext, audit: PostgresAuditSink, repository: BusinessRepository,
-                 reference: str, mode: str) -> dict:
+                 reference: str, mode: str, *, faq_question: PublicFaqQuestion | None = None,
+                 faq_lookup: FaqLookup | None = None, budget_seconds: float = 40) -> dict:
     lookup = build_repository_lookup(repository)
     registry = ToolRegistry()
     register_flight_tool(registry, lookup)
@@ -60,15 +63,20 @@ async def flight(context: ToolContext, audit: PostgresAuditSink, repository: Bus
     elif mode == "offline":
         from .fixture_model import ScriptedFlightModel, tool_reply
 
-        model = ScriptedFlightModel(replies=[
-            tool_reply("lookup_flight", "offline-flight-lookup", reference=reference),
-            tool_reply("HandoffCandidate", "offline-handoff", reference=reference),
-        ])
-        result = await run_flight_role(role_input, model=model, lookup=lookup_selected, context=context, audit_sink=audit)
+        replies = [tool_reply("lookup_flight", "offline-flight-lookup", reference=reference)]
+        if faq_question is not None:
+            replies.append(tool_reply(FAQ_TOOL, "flight-faq"))
+        replies.append(tool_reply("HandoffCandidate", "offline-handoff", reference=reference))
+        result = await run_flight_role(
+            role_input, model=ScriptedFlightModel(replies=replies), lookup=lookup_selected,
+            context=context, audit_sink=audit, timeout=budget_seconds,
+            faq_question=faq_question, faq_lookup=faq_lookup,
+        )
     else:
         result = handoff_from_facts(FlightToolData.model_validate(owned.data), owned.tool_call_id)
 
     report = {**asdict(result), "mode": mode, "provider_requests": provider_requests}
+    report.pop("faq")
     if result.handoff is not None:
         airport_context = ToolContext(context.user_id, MCP_ROLE, context.run_id, context.thread_id)
         report["airport"] = asdict(await airport(airport_context, audit, result.handoff.arrival_airport))
@@ -84,6 +92,7 @@ def restrict_lookup(lookup, reference):
 async def run(
     operation: str, user_id: UUID, value: str | dict, request_id: UUID, mode: str,
     *, thread_id: UUID | None = None, budget_seconds: float = 12,
+    faq_question: PublicFaqQuestion | None = None, faq_lookup: FaqLookup | None = None,
 ) -> dict:
     settings = read_settings()
     engine = create_engine(settings)
@@ -94,13 +103,16 @@ async def run(
 
             if not isinstance(value, dict) or thread_id is None:
                 raise ValueError("Hotel queries require a host-provided thread and stay")
-            model = ScriptedFlightModel(replies=[
-                tool_reply(HOTEL_TOOL, "hotel-inventory"), AIMessage(content="库存已核验"),
-            ])
+            replies = [tool_reply(HOTEL_TOOL, "hotel-inventory")]
+            if faq_question is not None:
+                replies.append(tool_reply(FAQ_TOOL, "hotel-faq"))
+            replies.append(AIMessage(content="库存已核验"))
+            model = ScriptedFlightModel(replies=replies)
             result = await run_hotel_role(
                 HotelQuery.from_json(value), model=model, repository=BusinessRepository(engine, settings.schema),
                 context=ToolContext(user_id, "hotel", request_id, thread_id), audit_sink=audit,
                 deadline=asyncio.get_running_loop().time() + budget_seconds,
+                faq_question=faq_question, faq_lookup=faq_lookup,
             )
             return {
                 "status": result.status, "options": [option.to_json() for option in result.options],
@@ -109,27 +121,58 @@ async def run(
         if operation == "flight":
             return await flight(
                 ToolContext(user_id, "flight", request_id, thread_id), audit, BusinessRepository(engine, settings.schema), value, mode,
+                faq_question=faq_question, faq_lookup=faq_lookup, budget_seconds=budget_seconds,
             )
         return asdict(await airport(ToolContext(user_id, MCP_ROLE, request_id), audit, value))
     finally:
         await engine.dispose()
 
 
+def _emit(frame) -> None:
+    text = json.dumps(frame, ensure_ascii=False, default=str)
+    if len(text) >= FAQ_FRAME_LIMIT:
+        raise ValueError("Local role frame is too large")
+    print(text, flush=True)
+
+
+def _receive() -> dict:
+    line = sys.stdin.readline(FAQ_FRAME_LIMIT + 1)
+    if not line or len(line) > FAQ_FRAME_LIMIT:
+        raise ValueError("Invalid local role frame")
+    data = json.loads(line)
+    if not isinstance(data, dict):
+        raise ValueError("Invalid local role frame")
+    return data
+
+
 def main() -> int:
     try:
-        payload = json.load(sys.stdin)
+        payload = _receive()
         operation, mode = payload["operation"], payload["flight_mode"]
         if operation not in {"flight", "airport", "hotel"} or mode not in {"direct", "offline", "deepseek"}:
             return 1
+        raw_question = payload.get("faq_question")
+        question = PublicFaqQuestion.model_validate(raw_question) if raw_question is not None else None
+        if question is not None and (operation not in FAQ_ROLES or mode != "offline"):
+            return 1
+
+        async def read_faq(item: PublicFaqQuestion) -> FaqSearchResult:
+            _emit({"type": "faq_request", "role": operation, "question": item.model_dump(mode="json")})
+            frame = await asyncio.to_thread(_receive)
+            if set(frame) != {"type", "result"} or frame["type"] != "faq_evidence":
+                raise ValueError("Invalid FAQ evidence frame")
+            return FaqSearchResult.model_validate_json(json.dumps(frame["result"]))
+
         with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
             result = runner.run(run(
                 operation, UUID(payload["user_id"]), payload["value"], UUID(payload["request_id"]), mode,
                 thread_id=UUID(payload["thread_id"]) if payload.get("thread_id") else None,
                 budget_seconds=payload.get("budget_seconds", 12),
+                faq_question=question, faq_lookup=read_faq if question is not None else None,
             ))
     except Exception:
         return 1
-    print(json.dumps(result, ensure_ascii=False, default=str))
+    _emit({"type": "result", "result": result} if question is not None else result)
     return 0
 
 

@@ -15,7 +15,7 @@ from customer_support_chat.app.tooling.executor import valid_tool_call_id
 from faq_extension.contracts import FaqSearchResult, PublicFaqQuestion
 from .faq_turn import classify_faq_turn, faq_reply
 from .hotel_handoff import (
-    HotelPending, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival,
+    REFERENCE, HotelPending, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival,
     resolve_hotel_turn, stay_checkout,
 )
 
@@ -108,22 +108,45 @@ def build_parent_graph(
         faq_turn = classify_faq_turn(content)
         if faq_turn.kind == "ordinary":
             return await business_turn(state, user, thread, content)
-        if faq_turn.question is None:
-            policy = FaqSearchResult(status="rephrase")
-        else:
-            policy = await faq_search(faq_turn.question)
         if faq_turn.business_text:
-            update = await business_turn(state, user, thread, faq_turn.business_text)
+            update = await business_turn(state, user, thread, faq_turn.business_text, faq_turn.question)
+            if "faq" in update["completed"]:
+                return update
         else:
-            update = complete(state, "faq", faq_reply(policy))
-        update["completed"]["faq"] = policy.model_dump(mode="json")
+            update = None
+        policy = (
+            await faq_search(faq_turn.question) if faq_turn.question is not None
+            else FaqSearchResult(status="rephrase")
+        )
+        return with_faq(update or complete(state, "faq", faq_reply(policy)), policy)
+
+    def with_faq(update: GraphState, policy: FaqSearchResult | None) -> GraphState:
+        if policy is not None:
+            update["completed"]["faq"] = policy.model_dump(mode="json")
         return update
 
-    async def business_turn(state: GraphState, user: UUID, thread: UUID, content: str) -> GraphState:
+    async def business_turn(
+        state: GraphState, user: UUID, thread: UUID, content: str, faq_question: PublicFaqQuestion | None = None,
+    ) -> GraphState:
         if flight_lookup is None or hotel_search is None:
             return complete(state, "recorded")
         turn = resolve_hotel_turn(content, state.get("hotel_pending"))
         if turn.action == "ordinary":
+            references = REFERENCE.findall(content.upper())
+            if faq_question is not None and len(references) == 1:
+                try:
+                    arrival = await flight_lookup(user, thread, references[0], faq_question=faq_question)
+                except RoleUnavailable:
+                    return with_faq(
+                        complete(state, "unavailable", "暂时无法核验航班，请稍后再试。"),
+                        FaqSearchResult(status="unavailable"),
+                    )
+                if arrival is not None and arrival.reference == references[0] and valid_tool_call_id(arrival.tool_call_id):
+                    return with_faq(
+                        complete(state, "recorded", f"已核验航班，到达机场为 {arrival.airport}。"),
+                        arrival.faq,
+                    )
+                return complete(state, "unavailable", "无法核验该航班，请检查本人航班编号。")
             return complete(state, "recorded")
         if turn.action == "cancel":
             return complete(state, "recorded", "已取消酒店查询。") | {"hotel_pending": None, "hotel_arrival": None}
@@ -165,12 +188,15 @@ def build_parent_graph(
                     "hotel_pending": pending | {"waiting": "nights", "arrival_date": arrival_date},
                     "hotel_arrival": provenance,
                 }
-            result = await hotel_search(user, thread, HotelQuery(
+            query = HotelQuery(
                 arrival.city, arrival.timezone, arrival.local_date, check_out,
                 pending.get("area"), pending.get("room_type"),
-            ))
+            )
+            faq_options = {"faq_question": faq_question} if faq_question is not None else {}
+            result = await hotel_search(user, thread, query, **faq_options)
         except RoleUnavailable:
-            return complete(state, "unavailable", RETRY_HOTEL) | {"hotel_pending": None, "hotel_arrival": None}
+            update = complete(state, "unavailable", RETRY_HOTEL) | {"hotel_pending": None, "hotel_arrival": None}
+            return with_faq(update, FaqSearchResult(status="unavailable") if faq_question is not None else None)
 
         reply = {
             "hotel_results": "以下是整段住宿均有库存的演示酒店。",
@@ -182,7 +208,7 @@ def build_parent_graph(
             update["completed"]["hotel_options"] = [option.to_json() for option in result.options]
         update["hotel_pending"] = None
         update["hotel_arrival"] = provenance
-        return update
+        return with_faq(update, result.faq)
 
     def route(state: GraphState) -> GuardDecision:
         return state["decision"]

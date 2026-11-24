@@ -16,6 +16,8 @@ from customer_support_chat.app.tooling.executor import (
     AuditSink, ToolContext, ToolDefinition, ToolExecutor, ToolRegistry, valid_tool_call_id,
 )
 from customer_support_chat.app.workflow.hotel_handoff import HotelOption, HotelQuery, HotelRoleResult
+from faq_extension.contracts import PublicFaqQuestion
+from .public_faq import FaqLookup, FaqRoleCall
 
 
 HOTEL_TOOL = "search_hotel_inventory"
@@ -62,10 +64,13 @@ def register_hotel_tool(registry: ToolRegistry, repository: BusinessRepository, 
 async def run_hotel_role(
     query: HotelQuery, *, model: BaseChatModel, repository: BusinessRepository,
     context: ToolContext, audit_sink: AuditSink, deadline: float,
+    faq_question: PublicFaqQuestion | None = None, faq_lookup: FaqLookup | None = None,
 ) -> HotelRoleResult:
     registry = ToolRegistry()
     register_hotel_tool(registry, repository, query)
     executor = ToolExecutor(registry, audit_sink)
+    faq = FaqRoleCall(registry, faq_question, faq_lookup)
+    faq_executor = ToolExecutor(registry, audit_sink, timeout=6)
     receipt: tuple[HotelOption, ...] | None = None
 
     @after_model
@@ -76,9 +81,11 @@ async def run_hotel_role(
         calls = message.tool_calls
         if not message.invalid_tool_calls and not calls and receipt is not None:
             return None
-        if not message.invalid_tool_calls and len(calls) == 1 and receipt is None:
+        if not message.invalid_tool_calls and len(calls) == 1:
             call = calls[0]
-            if call["name"] == HOTEL_TOOL and not call["args"] and valid_tool_call_id(call.get("id")):
+            if receipt is not None and faq.accepts(call):
+                return None
+            if receipt is None and call["name"] == HOTEL_TOOL and not call["args"] and valid_tool_call_id(call.get("id")):
                 return None
         for call in [*calls, *message.invalid_tool_calls]:
             await executor.reject_envelope(context, call.get("name") or "", call.get("id") or "")
@@ -96,13 +103,23 @@ async def run_hotel_role(
         receipt = tuple(HotelOption.from_json(row) for row in result.data["options"])
         return json.dumps(result.data, ensure_ascii=False)
 
+    @tool
+    async def search_public_faq(runtime: ToolRuntime) -> str:
+        """Read evidence for the public policy question supplied by the host."""
+        return await faq.invoke(faq_executor, context, runtime.tool_call_id)
+
+    tools = [search_hotel_inventory, search_public_faq] if faq.enabled else [search_hotel_inventory]
+    prompt = "Call the inventory tool once. The host supplies the complete stay."
+    if faq.enabled:
+        prompt += " Then call search_public_faq once for the host policy question."
+
     try:
         with tracing_context(enabled=False):
             agent = create_agent(
-                model, tools=[search_hotel_inventory], middleware=[
-                    ModelCallLimitMiddleware(run_limit=2, exit_behavior="end"), check_call,
+                model, tools=tools, middleware=[
+                    ModelCallLimitMiddleware(run_limit=2 + int(faq.enabled), exit_behavior="end"), check_call,
                 ],
-                system_prompt="Call the inventory tool once. The host supplies the complete stay.",
+                system_prompt=prompt,
             )
             async with asyncio.timeout_at(deadline):
                 await agent.ainvoke({"messages": [{"role": "user", "content": json.dumps(
@@ -112,4 +129,4 @@ async def run_hotel_role(
         return HotelRoleResult("unavailable")
     if receipt is None:
         return HotelRoleResult("unavailable")
-    return HotelRoleResult("hotel_results", receipt) if receipt else HotelRoleResult("no_availability")
+    return HotelRoleResult("hotel_results" if receipt else "no_availability", receipt, faq.result)

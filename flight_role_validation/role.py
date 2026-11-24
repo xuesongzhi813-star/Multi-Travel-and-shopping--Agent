@@ -1,7 +1,7 @@
 """Run a bounded, read-only flight role and verify its handoff."""
 
 import asyncio
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import date
 import json
 import re
@@ -22,6 +22,8 @@ from pydantic import Field, ValidationError
 from customer_support_chat.app.tooling.executor import (
     AuditSink, ToolContext, ToolExecutor, ToolRegistry, valid_tool_call_id,
 )
+from faq_extension.contracts import FaqSearchResult, PublicFaqQuestion
+from .public_faq import FaqLookup, FaqRoleCall
 from .executor import FLIGHT_REFERENCE, FlightLookup, FlightToolData, LookupArguments, register_flight_tool
 
 
@@ -80,11 +82,13 @@ class FlightRoleResult:
     status: Literal["verified", "needs_clarification", "unavailable"]
     reason: str | None = None
     handoff: FlightHandoff | None = None
+    faq: FaqSearchResult | None = None
 
 
 async def run_flight_role(
     input: FlightRoleInput, *, model: BaseChatModel, lookup: FlightLookup, timeout: float = 40,
     context: ToolContext | None = None, audit_sink: AuditSink | None = None,
+    faq_question: PublicFaqQuestion | None = None, faq_lookup: FaqLookup | None = None,
 ) -> FlightRoleResult:
     target = input.target_reference
     if target is None or re.fullmatch(FLIGHT_REFERENCE, target) is None:
@@ -96,7 +100,10 @@ async def run_flight_role(
 
     registry = ToolRegistry()
     register_flight_tool(registry, lookup)
-    executor = ToolExecutor(registry, audit_sink if audit_sink is not None else InMemoryAudit())
+    faq = FaqRoleCall(registry, faq_question, faq_lookup)
+    audit = audit_sink if audit_sink is not None else InMemoryAudit()
+    executor = ToolExecutor(registry, audit)
+    faq_executor = ToolExecutor(registry, audit, timeout=6)
     evidence: dict[str, tuple[FlightToolData, str]] = {}
 
     @after_model
@@ -114,14 +121,17 @@ async def run_flight_role(
         call_id = call.get("id")
         if not valid_tool_call_id(call_id):
             raise FlightProtocolError("Invalid model tool call identifier")
+        if faq.accepts(call):
+            return None
         if call["name"] == "HandoffCandidate":
             LookupArguments.model_validate(call["args"])
             return None
         try:
             if call["name"] != "lookup_flight":
+                await executor.reject_envelope(context, call["name"], call_id)
                 raise FlightProtocolError("Unexpected model tool")
             LookupArguments.model_validate(call["args"])
-        except (FlightProtocolError, ValidationError) as error:
+        except ValidationError as error:
             await executor.execute(context, call["name"], call["args"], call_id)
             raise FlightProtocolError("Rejected model tool call") from error
         return None
@@ -143,15 +153,25 @@ async def run_flight_role(
         evidence[reference] = (FlightToolData.model_validate(result.data), result.tool_call_id)
         return json.dumps(result.data, ensure_ascii=False)
 
+    @tool
+    async def search_public_faq(runtime: ToolRuntime) -> str:
+        """Read evidence for the public policy question supplied by the host."""
+        return await faq.invoke(faq_executor, context, runtime.tool_call_id)
+
+    tools = [lookup_flight, search_public_faq] if faq.enabled else [lookup_flight]
+    prompt = SYSTEM_PROMPT
+    if faq.enabled:
+        prompt += " The host also requests one call to search_public_faq before handoff."
+
     # Explicitly prevent platform tracing from turning these role inputs into external calls.
     from langsmith import tracing_context
 
     try:
         with tracing_context(enabled=False):
             agent = create_agent(
-                model, tools=[lookup_flight], system_prompt=SYSTEM_PROMPT,
+                model, tools=tools, system_prompt=prompt,
                 middleware=[
-                    ModelCallLimitMiddleware(run_limit=MODEL_REQUEST_LIMIT, exit_behavior="error"),
+                    ModelCallLimitMiddleware(run_limit=MODEL_REQUEST_LIMIT + int(faq.enabled), exit_behavior="error"),
                     ToolCallLimitMiddleware(tool_name="lookup_flight", run_limit=FLIGHT_LOOKUP_LIMIT, exit_behavior="error"),
                     validate_model_response,
                 ],
@@ -179,7 +199,7 @@ async def run_flight_role(
     if not isinstance(candidate, HandoffCandidate) or candidate.reference != target or verified is None:
         return FlightRoleResult("unavailable", reason="unverified_evidence")
 
-    return handoff_from_facts(*verified)
+    return replace(handoff_from_facts(*verified), faq=faq.result)
 
 
 def handoff_from_facts(facts: FlightToolData, tool_call_id: str) -> FlightRoleResult:
