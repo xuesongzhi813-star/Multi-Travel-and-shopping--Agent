@@ -25,6 +25,7 @@ class BusinessTables:
     hotel_booking_proposals: Table
     hotel_bookings: Table
     hotel_booking_receipts: Table
+    user_preferences: Table
 
 
 def tables(schema: str) -> BusinessTables:
@@ -106,8 +107,18 @@ def tables(schema: str) -> BusinessTables:
         Column("elapsed_ms", Integer, nullable=False),
         Column("created_at", DateTime(timezone=True), nullable=False),
     )
+    preferences = Table(
+        "user_preferences", metadata,
+        Column("user_id", Uuid, ForeignKey(f"{schema}.users.id", ondelete="CASCADE"), primary_key=True),
+        Column("room_type", String(32)),
+        Column("area", String(32)),
+        Column("max_total_chf_minor", Integer),
+        CheckConstraint("room_type = 'standard'", name="user_preferences_room_type"),
+        CheckConstraint("area IN ('airport', 'city')", name="user_preferences_area"),
+        CheckConstraint("max_total_chf_minor BETWEEN 1 AND 1000000", name="user_preferences_budget"),
+    )
     return BusinessTables(users, auth_sessions, threads, messages, itineraries, hotels, inventory, audit,
-                          *booking_tables(metadata, schema))
+                          *booking_tables(metadata, schema), preferences)
 
 
 def booking_tables(metadata, schema):
