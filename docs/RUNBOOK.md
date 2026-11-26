@@ -97,3 +97,17 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\run-local.ps1 -Action 
 前四个 CLI 子命令均由 .\.venv\Scripts\python.exe -B scripts\manage_faq.py 执行。构建和回退用独立集合与修订号。真实构建会发送公开 FAQ 切片请求嵌入。
 
 单独运行 .\.venv\Scripts\python.exe -B scripts\verify_faq_siliconflow.py --max-requests 10 可验收真实嵌入与精排。该命令创建临时表和集合，退出前清理，只打印状态和调用次数。
+
+## P10 住宿偏好与会话内再查
+
+正式启动会应用迁移 `0005_user_preferences`。登录后发送“请记住：我以后住标准房，优先机场附近，总预算 200 瑞郎”，页面显示保存的偏好。只说“这次住标准房”时，条件只应用于本次查询。新会话查询酒店时会使用账号当前偏好，明确给出的本次条件优先。总预算是整段住宿的 CHF 总价。
+
+在 [本机 API 文档](http://127.0.0.1:8000/docs) 使用当前登录会话管理偏好。
+
+- `GET /api/me/preferences` 查看本人保存值，空字段为 `null`。
+- `PATCH /api/me/preferences` 只修改给出的字段。例如 `{"max_total_chf_minor": 40000}` 将上限设为 400 瑞郎。`{"area": null}` 清除已保存区域。无效字段或格式返回 `422`。
+- `DELETE /api/me/preferences` 清除全部偏好并返回 `204`。未登录请求返回 `401`。
+
+在原会话发送“按上次的酒店条件再查”，会沿用上次明确给出的条件，并重新核验航班和库存。可以发送“按上次的酒店条件再查，这次住市区”覆盖这次的区域。已经删除的账号偏好不会从旧对话重新应用。
+
+运行 `./.venv/Scripts/python.exe -B scripts/verify_local_e2e.py`，使用本地服务和临时合成账号执行，包括账号隔离、修改、删除与原会话再查。

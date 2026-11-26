@@ -190,6 +190,44 @@ def verify_booking(client, path, last_recommendation, password_b):
     print("PASS P7 proposal, refusal, cross-account protection, stale quote, duplicate approval and stock/receipt", flush=True)
 
 
+def verify_preferences(client: Client, password_a: str, password_b: str) -> None:
+    endpoint = "/api/me/preferences"
+    empty = {"room_type": None, "area": None, "max_total_chf_minor": None}
+
+    def messages_path():
+        thread = require(client.post("/api/threads"), 201).json()["thread_id"]
+        return f"/api/threads/{thread}/messages"
+
+    def message(path, content):
+        return require(client.post(path, json={"content": content}), 201).json()
+
+    login(client, "demo-a", password_a)
+    assert require(client.get(endpoint), 200).json() == empty
+    saved = message(messages_path(), "请记住：我以后住标准房，优先机场附近，总预算 200 瑞郎")
+    assert saved["status"] == "recorded" and "已保存" in saved["reply"]
+    assert require(client.get(endpoint), 200).json() == {
+        "room_type": "standard", "area": "airport", "max_total_chf_minor": 20000,
+    }
+    with Client(base_url=client.base_url, timeout=20, trust_env=False) as other:
+        login(other, "demo-b", password_b)
+        assert require(other.get(endpoint), 200).json() == empty
+
+    path = messages_path()
+    offer = message(path, "找 DEMO-A1 的酒店，住 1 晚")
+    assert offer["status"] == "hotel_results" and offer["hotel_options"]
+    assert all(row["room_type"] == "standard" and row["area"] == "airport" and row["total_minor"] <= 20000
+               for row in offer["hotel_options"])
+    updated = require(client.patch(endpoint, json={"max_total_chf_minor": 17000}), 200).json()
+    assert updated == {"room_type": "standard", "area": "airport", "max_total_chf_minor": 17000}
+    assert message(path, "按上次的酒店条件再查")["status"] == "no_availability"
+    require(client.delete(endpoint), 204)
+    assert require(client.get(endpoint), 200).json() == empty
+    replay = message(path, "按上次的酒店条件再查")
+    assert replay["status"] == "hotel_results" and replay["hotel_options"] == offer["hotel_options"]
+    print("PASS P10 explicit save, account isolation, new-thread defaults, modification and deletion before replay", flush=True)
+
+
+
 def verify_offline_faq(client, path, hotel_path):
     faq_statuses = {"ok", "not_published", "no_evidence", "unavailable"}
     standalone = require(client.post(path + "/messages", json={"content": "行李延误怎么办？"}), 201).json()
@@ -330,6 +368,7 @@ def run(live):
                 assert option["source_url"].startswith("https://www.zuerich.com/en/accommodation/")
             print("PASS P8 sourced hotel options on formal HTTP, multi-night dates and sold-out filtering", flush=True)
             verify_offline_faq(client, path, hotel_path)
+            verify_preferences(client, password_a, password_b)
         with server(free_port(), dict(env, REDIS_PORT=str(free_port())), launcher=False) as client:
             health = require(client.get("/health/ready"), 200).json()
             assert health["status"] == "degraded" and health["dependencies"]["redis"] is False
