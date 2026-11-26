@@ -8,6 +8,8 @@ from unicodedata import normalize
 
 from faq_extension.contracts import FaqSearchResult
 
+from .preference_commands import AIRPORT, CITY, ROOM, parse_total_chf_minor
+
 
 @dataclass(frozen=True)
 class HotelQuery:
@@ -17,13 +19,21 @@ class HotelQuery:
     check_out: date
     area: str | None = None
     room_type: str | None = None
+    max_total_chf_minor: int | None = None
 
     def __post_init__(self) -> None:
         if not 1 <= (self.check_out - self.check_in).days <= 14:
             raise ValueError("A hotel stay must be 1 to 14 nights")
 
+        budget = self.max_total_chf_minor
+        if budget is not None and (type(budget) is not int or not 1 <= budget <= 1000000):
+            raise ValueError("Invalid total hotel budget")
+
     def to_json(self) -> dict:
-        return asdict(self) | {"check_in": self.check_in.isoformat(), "check_out": self.check_out.isoformat()}
+        fields = asdict(self) | {"check_in": self.check_in.isoformat(), "check_out": self.check_out.isoformat()}
+        if self.max_total_chf_minor is None:
+            del fields["max_total_chf_minor"]
+        return fields
 
     @classmethod
     def from_json(cls, payload: dict) -> "HotelQuery":
@@ -92,12 +102,13 @@ class HotelPending(TypedDict, total=False):
     check_out: str | None
     area: str | None
     room_type: str | None
+    max_total_chf_minor: int | None
     arrival_date: str
 
 
 @dataclass(frozen=True)
 class HotelTurn:
-    action: Literal["ordinary", "cancel", "hotel", "clarify_filters"]
+    action: Literal["ordinary", "cancel", "hotel", "clarify_filters", "clarify_budget"]
     request: HotelPending | None = None
 
 
@@ -126,7 +137,12 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
     new_request = ("酒店" in text or "住宿" in text) and (
         references or any(word in text for word in ("找", "查", "推荐", "落地", "到达"))
     )
-    bare_reply = text.rstrip("。.!！").strip()
+    clauses = [clause.strip() for clause in re.split(r"[,、]", text.rstrip("。.!！"))]
+    budget_clauses = [clause for clause in clauses if "预算" in clause]
+    bare_reply = "，".join(
+        clause for clause in clauses
+        if clause not in budget_clauses and not (AIRPORT.fullmatch(clause) or CITY.fullmatch(clause) or ROOM.fullmatch(clause))
+    ).strip()
     reference_only = REFERENCE.fullmatch(bare_reply.upper())
     reference_prefix = REFERENCE.match(bare_reply.upper())
     stay_text = bare_reply
@@ -163,6 +179,11 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
         request["area"] = "airport" if airport else "city"
     if STANDARD_ROOM.search(text):
         request["room_type"] = "standard"
+    if budget_clauses:
+        budget = parse_total_chf_minor(budget_clauses[0])
+        if len(budget_clauses) != 1 or budget is None:
+            return HotelTurn("clarify_budget")
+        request["max_total_chf_minor"] = budget
     return HotelTurn("hotel", request)
 
 

@@ -139,6 +139,8 @@ class BusinessRepository:
             statement = statement.where(hotel.c.area == query.area)
         if query.room_type is not None:
             statement = statement.where(inventory.c.room_type == query.room_type)
+        if query.max_total_chf_minor is not None:
+            statement = statement.where(inventory.c.currency == "CHF").having(price <= query.max_total_chf_minor)
         async with self.engine.connect() as connection:
             rows = (await connection.execute(statement)).all()
         return [

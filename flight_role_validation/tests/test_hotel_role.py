@@ -82,3 +82,15 @@ class HotelRoleTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((await self.invoke(model)).status, "unavailable")
         self.assertEqual(self.lookups, [self.query])
         self.assertEqual([r.status for r in self.rows], ["ok", "invalid_arguments"])
+
+    async def test_hotel_tool_receives_host_budget(self):
+        from dataclasses import replace
+
+        limited = replace(self.query, max_total_chf_minor=37000)
+        self.query = HotelQuery.from_json(limited.to_json())
+        model = CapturingModel(replies=[
+            tool_reply("search_hotel_inventory", "limited"), AIMessage(content="ok"),
+        ])
+        self.assertEqual((await self.invoke(model)).status, "hotel_results")
+        self.assertEqual(self.lookups, [limited])
+        self.assertIn("37000", repr(model.received[0]))

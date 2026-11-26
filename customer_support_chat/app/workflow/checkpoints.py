@@ -113,6 +113,7 @@ class GraphRuntime:
             load_message, saver, flight_lookup=flight_lookup, hotel_search=hotel_search,
             booking_execute=self._resolve_booking if booking_executor is not None else None, faq_search=faq_search,
             save_preferences=save_preferences,
+            load_preferences=preference_repository.get if preference_repository is not None else None,
         )
 
     async def _resolve_booking(self, scope, request_id):

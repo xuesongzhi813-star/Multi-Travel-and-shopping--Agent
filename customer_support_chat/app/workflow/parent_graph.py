@@ -30,6 +30,7 @@ HotelSearch = Callable[[UUID, UUID, HotelQuery], Awaitable[HotelRoleResult]]
 FaqSearch = Callable[[PublicFaqQuestion], Awaitable[FaqSearchResult]]
 BookingExecutor = Callable[[BookingScope, UUID], Awaitable[BookingResolution]]
 PreferenceSaver = Callable[[UUID, PreferencePatch], Awaitable[PreferenceValues]]
+PreferenceLoader = Callable[[UUID], Awaitable[PreferenceValues]]
 BOOKING_NODE = "apply_booking_decision"
 TurnStatus = Literal["recorded", "rejected", "needs_clarification", "hotel_results", "no_availability", "unavailable", "faq"]
 RETRY_HOTEL = "暂时无法完成酒店查询，请重新发送包含航班和晚数的完整请求。"
@@ -79,6 +80,7 @@ def build_parent_graph(
     booking_execute: BookingExecutor | None = None,
     faq_search: FaqSearch | None = None,
     save_preferences: PreferenceSaver | None = None,
+    load_preferences: PreferenceLoader | None = None,
 ) -> CompiledStateGraph:
     async def check_input(state: GraphState, config: RunnableConfig) -> GraphState:
         content = await load_message(
@@ -161,6 +163,8 @@ def build_parent_graph(
             return complete(state, "recorded")
         if turn.action == "cancel":
             return complete(state, "recorded", "已取消酒店查询。") | {"hotel_pending": None, "hotel_arrival": None}
+        if turn.action == "clarify_budget":
+            return complete(state, "needs_clarification", "请提供整段住宿的瑞郎总预算，例如“总预算 400 瑞郎”。")
         if turn.action == "clarify_filters":
             return complete(state, "needs_clarification", "请明确想住的区域或房型，并重新发送酒店请求。") | {
                 "hotel_pending": None, "hotel_arrival": None,
@@ -199,9 +203,12 @@ def build_parent_graph(
                     "hotel_pending": pending | {"waiting": "nights", "arrival_date": arrival_date},
                     "hotel_arrival": provenance,
                 }
+            defaults = await load_preferences(user) if load_preferences is not None else {}
             query = HotelQuery(
                 arrival.city, arrival.timezone, arrival.local_date, check_out,
-                pending.get("area"), pending.get("room_type"),
+                pending.get("area", defaults.get("area")),
+                pending.get("room_type", defaults.get("room_type")),
+                pending.get("max_total_chf_minor", defaults.get("max_total_chf_minor")),
             )
             faq_options = {"faq_question": faq_question} if faq_question is not None else {}
             result = await hotel_search(user, thread, query, **faq_options)

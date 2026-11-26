@@ -54,3 +54,28 @@ class HotelInventoryTests(BusinessDatabaseTest):
         self.assertEqual(options[0].to_json()["check_out"], "2026-12-16")
         self.assertEqual(HotelOption.from_json(options[0].to_json()), options[0])
         self.assertEqual(HotelQuery.from_json(one_night.to_json()), one_night)
+
+    async def test_applies_chf_budget_to_full_stay_before_limit(self):
+        async with self.engine.begin() as connection:
+            for index in range(5):
+                hotel = f"currency-fixture-{index}"
+                await connection.execute(self.db.hotels.insert().values(id=hotel, name=hotel, area="airport"))
+                await connection.execute(self.db.hotel_inventory.insert(), [
+                    {"hotel_id": hotel, "stay_date": self.first + timedelta(days=day), "room_type": "standard",
+                     "quantity": 1, "price_minor": 1, "currency": "CAD"}
+                    for day in range(2)
+                ])
+        legacy = await self.repository.list_available_hotels(self.query)
+        self.assertEqual({item.currency for item in legacy}, {"CAD"})
+        within_budget = await self.repository.list_available_hotels(replace(self.query, max_total_chf_minor=37000))
+        self.assertEqual([(item.hotel_id, item.total_minor) for item in within_budget],
+                         [("cheaper", 28000), ("available", 37000)])
+        lower_budget = await self.repository.list_available_hotels(replace(self.query, max_total_chf_minor=36999))
+        self.assertEqual([item.hotel_id for item in lower_budget], ["cheaper"])
+
+    def test_query_payload_accepts_legacy_and_budget(self):
+        legacy = self.query.to_json()
+        legacy.pop("max_total_chf_minor", None)
+        self.assertIsNone(HotelQuery.from_json(legacy).max_total_chf_minor)
+        limited = replace(self.query, max_total_chf_minor=37000)
+        self.assertEqual(HotelQuery.from_json(limited.to_json()), limited)
