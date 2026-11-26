@@ -15,6 +15,9 @@ from customer_support_chat.app.business.preferences import PreferencePatch, Pref
 from customer_support_chat.app.tooling.executor import valid_tool_call_id
 from faq_extension.contracts import FaqSearchResult, PublicFaqQuestion
 from .faq_turn import classify_faq_turn, faq_reply
+from .hotel_history import (
+    HotelHistory, apply_hotel_replay, capture_hotel_history, load_hotel_history, parse_hotel_replay, track_hotel_sources,
+)
 from .preference_commands import parse_preference_command, saved_preferences_reply
 from .hotel_handoff import (
     REFERENCE, HotelPending, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival,
@@ -61,6 +64,7 @@ class GraphState(TypedDict, total=False):
     decision: GuardDecision
     completed: GraphResult
     hotel_pending: HotelPending | None
+    last_hotel_query: HotelHistory
     hotel_arrival: dict[str, str] | None
     booking_action_id: str | None
 
@@ -115,6 +119,15 @@ def build_parent_graph(
             if preference.changes is not None:
                 await save_preferences(user, preference.changes)
                 return complete(state, "recorded", saved_preferences_reply(preference.changes))
+        replay = parse_hotel_replay(content)
+        if replay is not None:
+            if replay.changes is None:
+                return complete(state, "needs_clarification", "请明确本次要替换的住宿条件。")
+            history = await load_hotel_history(state.get("last_hotel_query"), user, thread, load_message)
+            if history is None:
+                return complete(state, "needs_clarification", "找不到可用的上次酒店条件，请重新提供航班和住宿要求。")
+            pending = apply_hotel_replay(history, replay.changes, state["message_id"])
+            return await search_hotel(state, user, thread, pending)
         if faq_search is None:
             return await business_turn(state, user, thread, content)
 
@@ -169,8 +182,16 @@ def build_parent_graph(
             return complete(state, "needs_clarification", "请明确想住的区域或房型，并重新发送酒店请求。") | {
                 "hotel_pending": None, "hotel_arrival": None,
             }
-        pending = turn.request
-        assert pending is not None
+        assert turn.request is not None
+        pending = track_hotel_sources(turn.request, turn.explicit_fields, state["message_id"])
+        return await search_hotel(state, user, thread, pending, faq_question)
+
+    async def search_hotel(
+        state: GraphState, user: UUID, thread: UUID, pending: HotelPending,
+        faq_question: PublicFaqQuestion | None = None,
+    ) -> GraphState:
+        if flight_lookup is None or hotel_search is None:
+            return complete(state, "recorded")
         reference = pending.get("reference")
         if not reference:
             return complete(state, "needs_clarification", "请提供一个本人航班编号。") | {
@@ -226,6 +247,10 @@ def build_parent_graph(
             update["completed"]["hotel_options"] = [option.to_json() for option in result.options]
         update["hotel_pending"] = None
         update["hotel_arrival"] = provenance
+        if result.status in {"hotel_results", "no_availability"}:
+            history = capture_hotel_history(pending)
+            if history is not None:
+                update["last_hotel_query"] = history
         return with_faq(update, result.faq)
 
     def route(state: GraphState) -> GuardDecision:

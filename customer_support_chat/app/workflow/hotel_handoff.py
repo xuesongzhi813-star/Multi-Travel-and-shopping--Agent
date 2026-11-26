@@ -104,12 +104,14 @@ class HotelPending(TypedDict, total=False):
     room_type: str | None
     max_total_chf_minor: int | None
     arrival_date: str
+    source_messages: dict[str, str]
 
 
 @dataclass(frozen=True)
 class HotelTurn:
     action: Literal["ordinary", "cancel", "hotel", "clarify_filters", "clarify_budget"]
     request: HotelPending | None = None
+    explicit_fields: frozenset[str] = frozenset()
 
 
 REFERENCE = re.compile(r"(?<![A-Z0-9-])DEMO-[A-Z][0-9]{1,3}(?![A-Z0-9-])", re.ASCII)
@@ -152,12 +154,15 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
     nights = NIGHTS.findall(text)
     dates = [first or second for first, second in CHECK_OUT.findall(text)]
 
+    explicit = set()
     if new_request:
         request: HotelPending = {"reference": references[0] if len(references) == 1 else None}
+        explicit.add("reference")
     elif pending is None:
         return HotelTurn("ordinary")
     elif reference_prefix is not None and (reference_only or stay_reply):
         request = {"reference": reference_prefix[0]}
+        explicit.add("reference")
         if pending["waiting"] == "reference":
             request = {**pending, **request}
     elif stay_reply:
@@ -169,22 +174,27 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
         return HotelTurn("ordinary")
 
     if nights:
+        explicit.add("nights")
         request["nights"] = int(nights[0]) if len(set(nights)) == 1 and len(nights[0]) <= 3 else 0
     if dates:
+        explicit.add("check_out")
         request["check_out"] = dates[0] if len(set(dates)) == 1 else "invalid"
     airport, city = AREA_AIRPORT.search(text), AREA_CITY.search(text)
     if AMBIGUOUS_FILTER.search(text) or (airport and city):
         return HotelTurn("clarify_filters")
     if airport or city:
+        explicit.add("area")
         request["area"] = "airport" if airport else "city"
     if STANDARD_ROOM.search(text):
+        explicit.add("room_type")
         request["room_type"] = "standard"
     if budget_clauses:
         budget = parse_total_chf_minor(budget_clauses[0])
         if len(budget_clauses) != 1 or budget is None:
             return HotelTurn("clarify_budget")
+        explicit.add("max_total_chf_minor")
         request["max_total_chf_minor"] = budget
-    return HotelTurn("hotel", request)
+    return HotelTurn("hotel", request, frozenset(explicit))
 
 
 def stay_checkout(check_in: date, request: HotelPending) -> date | None:

@@ -302,3 +302,32 @@ class GraphApiTests(BusinessDatabaseTest):
                         await task
                 self.assertEqual(len(processes), 1)
                 self.assertIsNotNone(processes[0].poll())
+
+    async def test_replay_after_six_unrelated_turns_and_restart(self):
+        path = await self.thread(self.a)
+        initial = await self.send(self.a, path, "帮我找 DEMO-A1 落地后的机场酒店")
+        self.assertEqual(initial.json()["status"], "needs_clarification")
+        result = await self.send(self.a, path, "住 1 晚")
+        original = result.json()["hotel_options"]
+        self.assertEqual((original[0]["check_in"], original[0]["check_out"]), ("2026-12-15", "2026-12-16"))
+        for index in range(6):
+            self.assertEqual((await self.send(self.a, path, f"谢谢 {index}")).json()["status"], "recorded")
+        restarted, _ = await self.client(0)
+        self.assertEqual((await self.send(self.b, path, "按上次的酒店条件再查")).status_code, 404)
+        replay = await self.send(restarted, path, "按上次的酒店条件再查")
+        self.assertEqual(replay.json()["hotel_options"], original)
+        changed = await self.send(restarted, path, "按上次的酒店条件再查，这次住市区")
+        self.assertEqual(changed.json()["status"], "no_availability")
+
+    async def test_replay_after_delete_never_reinstates_saved_preference(self):
+        path = await self.thread(self.a)
+        stored = await self.send(self.a, path, "请记住，以后优先市区")
+        self.assertIn("已保存", stored.json()["reply"])
+        constrained = await self.send(self.a, path, "找 DEMO-A1 的酒店，住 1 晚")
+        self.assertEqual(constrained.json()["status"], "no_availability")
+        self.assertEqual((await self.a.delete("/api/me/preferences")).status_code, 204)
+        restarted, _ = await self.client(0)
+        result = (await self.send(restarted, path, "按上次的酒店条件再查")).json()
+        self.assertEqual(result["status"], "hotel_results")
+        self.assertEqual([item["area"] for item in result["hotel_options"]], ["airport"])
+        self.assertTrue(all(value is None for value in (await restarted.get("/api/me/preferences")).json().values()))
