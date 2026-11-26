@@ -4,6 +4,7 @@ import asyncio
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from hashlib import blake2b
 import json
 from typing import Any
@@ -18,6 +19,7 @@ from sqlalchemy.exc import DBAPIError, TimeoutError as DatabasePoolTimeout
 
 from customer_support_chat.app.business.booking import BookingOwner, BookingScope, BookingSelection, ProposalConflict, ProposalNotFound, ProposalView
 from customer_support_chat.app.business.booking_repository import BookingRepository
+from customer_support_chat.app.business.preference_repository import PreferenceRepository
 from customer_support_chat.app.tooling.booking import ApprovedBookingExecutor
 from customer_support_chat.app.business.database import DatabaseSettings, connection_kwargs, local_value, validate_schema
 from .hotel_handoff import HotelOption
@@ -93,6 +95,8 @@ class GraphRuntime:
         flight_lookup: FlightLookup | None = None, hotel_search: HotelSearch | None = None,
         booking_repository: BookingRepository | None = None, booking_executor: ApprovedBookingExecutor | None = None,
         faq_search: FaqSearch | None = None,
+        preference_repository: PreferenceRepository | None = None,
+        preference_connection: AsyncConnection | None = None,
     ):
         self.saver = saver
         self.load_message = load_message
@@ -101,9 +105,14 @@ class GraphRuntime:
         self.booking_repository = booking_repository
         self.booking_executor = booking_executor
         self.faq_search = faq_search
+        self.preference_repository = preference_repository
+        save_preferences = None
+        if preference_repository is not None and preference_connection is not None:
+            save_preferences = partial(preference_repository.patch, connection=preference_connection)
         self.graph: CompiledStateGraph = build_parent_graph(
             load_message, saver, flight_lookup=flight_lookup, hotel_search=hotel_search,
             booking_execute=self._resolve_booking if booking_executor is not None else None, faq_search=faq_search,
+            save_preferences=save_preferences,
         )
 
     async def _resolve_booking(self, scope, request_id):
@@ -114,6 +123,7 @@ class GraphRuntime:
             AsyncPostgresSaver(connection, serde=CheckpointJsonSerializer()), self.load_message,
             flight_lookup=self.flight_lookup, hotel_search=self.hotel_search,
             booking_repository=self.booking_repository, booking_executor=self.booking_executor, faq_search=self.faq_search,
+            preference_repository=self.preference_repository, preference_connection=connection,
         )
 
     async def read_booking(self, thread_id: UUID, *, connection: AsyncConnection | None = None) -> BookingGraphState:
@@ -229,6 +239,7 @@ async def open_graph_runtime(
     flight_lookup: FlightLookup | None = None, hotel_search: HotelSearch | None = None,
     booking_repository: BookingRepository | None = None, booking_executor: ApprovedBookingExecutor | None = None,
     faq_search: FaqSearch | None = None,
+    preference_repository: PreferenceRepository | None = None,
 ) -> AsyncIterator[GraphRuntime]:
     pool = AsyncConnectionPool(
         kwargs=checkpoint_kwargs(settings, schema), open=False,
@@ -239,4 +250,5 @@ async def open_graph_runtime(
         yield GraphRuntime(
             saver, load_message, flight_lookup=flight_lookup, hotel_search=hotel_search,
             booking_repository=booking_repository, booking_executor=booking_executor, faq_search=faq_search,
+            preference_repository=preference_repository,
         )

@@ -276,6 +276,7 @@ def create_app(
                     config, schema, repository.read_owned_message, flight_lookup=flight_lookup, hotel_search=hotel_search,
                     booking_repository=booking_repository, booking_executor=booking_executor,
                     faq_search=faq_search or search_policy,
+                    preference_repository=app.state.preferences,
                 ) as graph:
                     app.state.graph = graph
                     yield

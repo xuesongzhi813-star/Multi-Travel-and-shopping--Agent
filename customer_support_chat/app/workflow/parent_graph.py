@@ -11,9 +11,11 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
 from customer_support_chat.app.business.booking import BookingOwner, BookingResolution, BookingScope
+from customer_support_chat.app.business.preferences import PreferencePatch, PreferenceValues
 from customer_support_chat.app.tooling.executor import valid_tool_call_id
 from faq_extension.contracts import FaqSearchResult, PublicFaqQuestion
 from .faq_turn import classify_faq_turn, faq_reply
+from .preference_commands import parse_preference_command, saved_preferences_reply
 from .hotel_handoff import (
     REFERENCE, HotelPending, HotelQuery, HotelRoleResult, RoleUnavailable, VerifiedArrival,
     resolve_hotel_turn, stay_checkout,
@@ -27,6 +29,7 @@ FlightLookup = Callable[[UUID, UUID, str], Awaitable[VerifiedArrival | None]]
 HotelSearch = Callable[[UUID, UUID, HotelQuery], Awaitable[HotelRoleResult]]
 FaqSearch = Callable[[PublicFaqQuestion], Awaitable[FaqSearchResult]]
 BookingExecutor = Callable[[BookingScope, UUID], Awaitable[BookingResolution]]
+PreferenceSaver = Callable[[UUID, PreferencePatch], Awaitable[PreferenceValues]]
 BOOKING_NODE = "apply_booking_decision"
 TurnStatus = Literal["recorded", "rejected", "needs_clarification", "hotel_results", "no_availability", "unavailable", "faq"]
 RETRY_HOTEL = "暂时无法完成酒店查询，请重新发送包含航班和晚数的完整请求。"
@@ -75,6 +78,7 @@ def build_parent_graph(
     hotel_search: HotelSearch | None = None,
     booking_execute: BookingExecutor | None = None,
     faq_search: FaqSearch | None = None,
+    save_preferences: PreferenceSaver | None = None,
 ) -> CompiledStateGraph:
     async def check_input(state: GraphState, config: RunnableConfig) -> GraphState:
         content = await load_message(
@@ -102,6 +106,13 @@ def build_parent_graph(
         content = await load_message(user, thread, UUID(state["message_id"]))
         if content is None:
             raise LookupError("Owned graph input is missing")
+        if save_preferences is not None:
+            preference = parse_preference_command(content)
+            if preference.kind == "invalid":
+                return complete(state, "needs_clarification", "请单独发送明确的保存指令，例如“请记住，以后优先标准房”。")
+            if preference.changes is not None:
+                await save_preferences(user, preference.changes)
+                return complete(state, "recorded", saved_preferences_reply(preference.changes))
         if faq_search is None:
             return await business_turn(state, user, thread, content)
 
