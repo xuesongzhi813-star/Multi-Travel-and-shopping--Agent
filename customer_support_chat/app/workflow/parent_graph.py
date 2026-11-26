@@ -127,7 +127,7 @@ def build_parent_graph(
             if history is None:
                 return complete(state, "needs_clarification", "找不到可用的上次酒店条件，请重新提供航班和住宿要求。")
             pending = apply_hotel_replay(history, replay.changes, state["message_id"])
-            return await search_hotel(state, user, thread, pending)
+            return await search_hotel(state, user, thread, pending, replaying=True)
         if faq_search is None:
             return await business_turn(state, user, thread, content)
 
@@ -177,7 +177,11 @@ def build_parent_graph(
         if turn.action == "cancel":
             return complete(state, "recorded", "已取消酒店查询。") | {"hotel_pending": None, "hotel_arrival": None}
         if turn.action == "clarify_budget":
-            return complete(state, "needs_clarification", "请提供整段住宿的瑞郎总预算，例如“总预算 400 瑞郎”。")
+            assert turn.request is not None
+            pending = track_hotel_sources(turn.request, turn.explicit_fields, state["message_id"])
+            return complete(
+                state, "needs_clarification", "请提供整段住宿的瑞郎总预算，例如“总预算 400 瑞郎”。",
+            ) | {"hotel_pending": pending | {"waiting": "budget"}, "hotel_arrival": None}
         if turn.action == "clarify_filters":
             return complete(state, "needs_clarification", "请明确想住的区域或房型，并重新发送酒店请求。") | {
                 "hotel_pending": None, "hotel_arrival": None,
@@ -188,7 +192,7 @@ def build_parent_graph(
 
     async def search_hotel(
         state: GraphState, user: UUID, thread: UUID, pending: HotelPending,
-        faq_question: PublicFaqQuestion | None = None,
+        faq_question: PublicFaqQuestion | None = None, *, replaying: bool = False,
     ) -> GraphState:
         if flight_lookup is None or hotel_search is None:
             return complete(state, "recorded")
@@ -220,7 +224,10 @@ def build_parent_graph(
                 reply = "您打算住几晚？"
                 if pending.get("nights") is not None or pending.get("check_out") is not None:
                     reply = "请确认住宿晚数（1–14 晚）或有效的退房日期。"
-                return complete(state, "needs_clarification", reply) | {
+                update = complete(state, "needs_clarification", reply)
+                if replaying:
+                    return update
+                return update | {
                     "hotel_pending": pending | {"waiting": "nights", "arrival_date": arrival_date},
                     "hotel_arrival": provenance,
                 }

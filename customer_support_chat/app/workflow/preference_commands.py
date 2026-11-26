@@ -15,8 +15,11 @@ class PreferenceCommand:
     changes: PreferencePatch | None = None
 
 
+BUDGET_MENTION = re.compile(r"预算|总价")
 TOTAL_BUDGET = re.compile(
-    r"总预算\s*(?:不超过|最多|上限(?:为)?|为|是)?\s*([0-9]{1,5}(?:\.[0-9]{1,2})?)\s*(?:瑞郎|瑞士法郎|CHF)",
+    r"(?:总预算\s*(?:不超过|最多|上限(?:为)?|为|是)?|"
+    r"(?:整段(?:住宿)?|住宿)?总价\s*(?:不超过|最多|上限(?:为)?))"
+    r"\s*([0-9]{1,5}(?:\.[0-9]{1,2})?)\s*(?:瑞郎|瑞士法郎|CHF)",
     re.IGNORECASE | re.ASCII,
 )
 FIELD_PREFIX = r"(?:我\s*)?(?:以后\s*)?(?:优先|偏好|想住|住|选择)?\s*"

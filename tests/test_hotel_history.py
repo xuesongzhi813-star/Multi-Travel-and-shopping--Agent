@@ -62,3 +62,14 @@ class HotelHistoryGraphTests(handoff_fixture.HotelHandoffGraphTests):
             self.assertEqual(replay["status"], "no_availability")
             self.assertEqual(self.queries[-1][2].area, "city")
             self.assertEqual((await self.send(graph, "住 2 晚"))["status"], "recorded")
+
+    async def test_replay_with_conflicting_dates_keeps_current_pending_request(self):
+        self.simulate_airport_failure = True
+        async with self.runtime() as graph:
+            await self.send(graph, "找 DEMO-A1 的酒店，住 1 晚，市区")
+            await self.send(graph, "找 DEMO-A1 的机场酒店")
+            invalid = await self.send(graph, "按上次的酒店条件再查，这次住 1 晚，退房 2026-12-20")
+            self.assertEqual(invalid["status"], "needs_clarification")
+            finished = await self.send(graph, "住 2 晚")
+            self.assertEqual(finished["status"], "unavailable")
+        self.assertEqual(self.queries[-1][2].area, "airport")

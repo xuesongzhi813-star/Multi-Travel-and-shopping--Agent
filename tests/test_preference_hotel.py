@@ -46,3 +46,29 @@ class PreferenceHotelTests(handoff_fixture.HotelHandoffGraphTests):
             self.assertEqual(answer["status"], "needs_clarification")
             self.assertIn("预算", answer["reply"])
         self.assertEqual(self.queries, [])
+
+    async def test_whole_stay_total_price_limit_overrides_saved_budget(self):
+        await self.preferences.patch(self.user, {"max_total_chf_minor": 40000})
+        async with self.runtime() as graph:
+            await self.send(graph, "找 DEMO-A1 的机场酒店，住 1 晚，整段总价不超过 100 瑞郎")
+        self.assertEqual(self.queries[-1][2].max_total_chf_minor, 10000)
+
+    async def test_budget_clarification_resumes_the_new_query(self):
+        async with self.runtime() as graph:
+            await self.send(graph, "找 DEMO-A1 的机场酒店，住 1 晚，预算 200")
+            reply = await self.send(graph, "找 DEMO-A1 的市区酒店，住 2 晚，预算 300")
+            self.assertEqual(reply["status"], "needs_clarification")
+            self.assertEqual(self.queries, [])
+            result = await self.send(graph, "总预算 300 瑞郎")
+            self.assertEqual(result["status"], "no_availability")
+        query = self.queries[-1][2]
+        self.assertEqual((query.area, query.max_total_chf_minor, (query.check_out - query.check_in).days),
+                         ("city", 30000, 2))
+
+    async def test_repeating_same_flight_keeps_explicit_pending_filters(self):
+        await self.preferences.patch(self.user, {"area": "airport", "max_total_chf_minor": 40000})
+        async with self.runtime() as graph:
+            await self.send(graph, "找 DEMO-A1 的市区酒店，总预算 300 瑞郎")
+            await self.send(graph, "DEMO-A1，住 2 晚")
+        query = self.queries[-1][2]
+        self.assertEqual((query.area, query.max_total_chf_minor), ("city", 30000))

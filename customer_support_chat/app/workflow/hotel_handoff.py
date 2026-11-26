@@ -8,7 +8,7 @@ from unicodedata import normalize
 
 from faq_extension.contracts import FaqSearchResult
 
-from .preference_commands import AIRPORT, CITY, ROOM, parse_total_chf_minor
+from .preference_commands import AIRPORT, BUDGET_MENTION, CITY, ROOM, parse_total_chf_minor
 
 
 @dataclass(frozen=True)
@@ -96,7 +96,7 @@ class VerifiedArrival:
 
 
 class HotelPending(TypedDict, total=False):
-    waiting: Literal["reference", "nights"]
+    waiting: Literal["reference", "nights", "budget"]
     reference: str | None
     nights: int | None
     check_out: str | None
@@ -140,7 +140,7 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
         references or any(word in text for word in ("找", "查", "推荐", "落地", "到达"))
     )
     clauses = [clause.strip() for clause in re.split(r"[,、]", text.rstrip("。.!！"))]
-    budget_clauses = [clause for clause in clauses if "预算" in clause]
+    budget_clauses = [clause for clause in clauses if BUDGET_MENTION.search(clause)]
     bare_reply = "，".join(
         clause for clause in clauses
         if clause not in budget_clauses and not (AIRPORT.fullmatch(clause) or CITY.fullmatch(clause) or ROOM.fullmatch(clause))
@@ -160,11 +160,15 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
         explicit.add("reference")
     elif pending is None:
         return HotelTurn("ordinary")
+    elif pending["waiting"] == "budget" and len(clauses) == 1 and budget_clauses:
+        request = pending.copy()
     elif reference_prefix is not None and (reference_only or stay_reply):
         request = {"reference": reference_prefix[0]}
         explicit.add("reference")
-        if pending["waiting"] == "reference":
+        if pending["waiting"] == "reference" or pending.get("reference") == reference_prefix[0]:
             request = {**pending, **request}
+            if stay_reply:
+                request.update(nights=None, check_out=None)
     elif stay_reply:
         request = {**pending, "nights": None, "check_out": None}
     elif pending["waiting"] == "nights" and re.fullmatch(r"-?[0-9]+", bare_reply):
@@ -191,7 +195,8 @@ def resolve_hotel_turn(content: str, pending: HotelPending | None) -> HotelTurn:
     if budget_clauses:
         budget = parse_total_chf_minor(budget_clauses[0])
         if len(budget_clauses) != 1 or budget is None:
-            return HotelTurn("clarify_budget")
+            request.pop("max_total_chf_minor", None)
+            return HotelTurn("clarify_budget", request, frozenset(explicit))
         explicit.add("max_total_chf_minor")
         request["max_total_chf_minor"] = budget
     return HotelTurn("hotel", request, frozenset(explicit))
