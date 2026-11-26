@@ -3,7 +3,6 @@
 import asyncio
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from hashlib import sha256
 import json
@@ -29,8 +28,9 @@ from customer_support_chat.app.business.booking import (
 from customer_support_chat.app.business.booking_repository import BookingRepository
 from customer_support_chat.app.tooling.audit import PostgresAuditSink
 from customer_support_chat.app.tooling.booking import ApprovedBookingExecutor
-from customer_support_chat.app.business.auth import hash_password, verify_password
+from customer_support_chat.app.business.auth import Principal, hash_password, verify_password
 from customer_support_chat.app.business.database import DatabaseSettings, create_engine, local_value, read_settings
+from customer_support_chat.app.business.preference_repository import PreferenceRepository
 from customer_support_chat.app.business.repository import BusinessRepository
 from customer_support_chat.app.workflow.checkpoints import (
     ROLE_GRAPH_TIMEOUT, GraphUnavailable, open_graph_runtime, read_checkpoint_schema,
@@ -49,6 +49,7 @@ from faq_extension.siliconflow import SiliconFlowFaqClient
 from .bookings import BookingCoordinator
 from .local_tools import FlightSettings, LocalToolError, LocalToolTimeout, ROLE_PYTHON, run_local_tool
 from .operations import error_response, http_error, observe_request, postgres_schema_ready, qdrant_ready, redis_ready
+from .preferences import preference_router
 
 
 COOKIE_NAME = "travel_session"
@@ -88,12 +89,6 @@ class HotelProposalRequest(RequestBody):
 
 class BookingDecisionRequest(RequestBody):
     decision: BookingDecision
-
-
-@dataclass(frozen=True)
-class Principal:
-    user_id: UUID
-    token_digest: str
 
 
 def token_digest(token: str) -> str:
@@ -189,6 +184,7 @@ def create_app(
             booking_executor = ApprovedBookingExecutor(booking_repository, PostgresAuditSink(engine, config.schema))
             app.state.bookings = BookingCoordinator(booking_repository)
             app.state.repository = repository
+            app.state.preferences = PreferenceRepository(config)
             app.state.database_settings = config
             app.state.checkpoint_schema = schema
             app.state.active_threads = set()
@@ -303,7 +299,7 @@ def create_app(
     async def readiness(request: Request):
         state = request.app.state
         schema = state.database_settings.schema
-        business_relations = ("tool_audit_logs", "hotel_booking_proposals", "hotel_bookings", "hotel_booking_receipts")
+        business_relations = ("tool_audit_logs", "hotel_booking_proposals", "hotel_bookings", "hotel_booking_receipts", "user_preferences")
         business, checkpoints, redis, qdrant = await asyncio.gather(
             postgres_schema_ready(state.engine, *(f"{schema}.{name}" for name in business_relations)),
             postgres_schema_ready(state.engine, f"{state.checkpoint_schema}.checkpoints"),
@@ -510,6 +506,7 @@ def create_app(
     async def itineraries(repository: Database, identity: Identity):
         return await repository.list_itineraries(identity.user_id)
 
+    app.include_router(preference_router(get_principal))
     return app
 
 

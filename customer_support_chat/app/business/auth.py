@@ -1,8 +1,16 @@
-"""Password hashing shared by the demo seed and authenticated runtime."""
+"""Authentication types and password hashing for the demo runtime."""
 
+from dataclasses import dataclass
 from hashlib import scrypt
 from hmac import compare_digest
 from secrets import token_bytes
+from uuid import UUID
+
+
+@dataclass(frozen=True)
+class Principal:
+    user_id: UUID
+    token_digest: str
 
 
 def derive_password(password: str, salt: bytes) -> bytes:
